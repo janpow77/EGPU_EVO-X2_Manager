@@ -350,6 +350,8 @@ pub struct PipelineInfo {
     pub queue_position: Option<usize>,
     pub blocked_by: Option<String>,
     pub vram_summary: VramSummary,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub multi_gpu_workloads: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -425,6 +427,7 @@ pub async fn get_pipelines(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 estimated_mb: cfg.vram_estimate_mb,
                 actual_mb: actual_vram,
             },
+            multi_gpu_workloads: cfg.multi_gpu_workloads.clone(),
         });
     }
 
@@ -510,6 +513,7 @@ pub async fn get_pipeline(
             estimated_mb: cfg.vram_estimate_mb,
             actual_mb: actual_vram,
         },
+        multi_gpu_workloads: cfg.multi_gpu_workloads.clone(),
     };
 
     Json(info).into_response()

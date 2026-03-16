@@ -517,6 +517,9 @@ pub struct PipelineConfig {
     pub cuda_only: Vec<String>,
     #[serde(default)]
     pub quiesce_hooks: Vec<QuiesceHook>,
+    /// Workload-Typen die auf beiden GPUs (primary + fallback) gleichzeitig laufen dürfen
+    #[serde(default)]
+    pub multi_gpu_workloads: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

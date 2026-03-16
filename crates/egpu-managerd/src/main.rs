@@ -222,10 +222,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Pipeline-Status ausgeben
     for p in &config.pipeline {
+        let multi_gpu_info = if p.multi_gpu_workloads.is_empty() {
+            String::new()
+        } else {
+            format!(", MultiGPU: {:?}", p.multi_gpu_workloads)
+        };
         info!(
-            "Pipeline: {} / {} — Prio {}, GPU {}, VRAM ~{} MB, Workloads: {:?}",
+            "Pipeline: {} / {} — Prio {}, GPU {}, VRAM ~{} MB, Workloads: {:?}{}",
             p.project, p.container, p.gpu_priority, p.gpu_device, p.vram_estimate_mb,
-            p.workload_types
+            p.workload_types, multi_gpu_info
         );
     }
 

@@ -41,7 +41,7 @@ health_score_critical_threshold = 40.0
 # Thermal Proaktiv
 thermal_throttle_temp_c = 85
 thermal_critical_temp_c = 90
-thermal_gradient_warning_c_per_min = 5.0
+thermal_gradient_warning_c_per_min = 15.0
 
 # P-State Proaktiv
 pstate_throttle_threshold = 4
@@ -108,6 +108,7 @@ restart_on_fallback = true
 redis_containers = ["audit_designer_redis"]
 remote_capable = ["embeddings"]
 cuda_only = ["ocr"]
+multi_gpu_workloads = ["embeddings"]
 quiesce_hooks = [
   { container = "audit_designer_redis", command = "redis-cli BGSAVE", timeout_seconds = 5 },
   { container = "audit_designer_db", command = "psql -U postgres -c 'CHECKPOINT'", timeout_seconds = 5 },

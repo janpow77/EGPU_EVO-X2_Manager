@@ -587,12 +587,15 @@ impl MonitorOrchestrator {
                                     .parse::<u32>()
                                     .unwrap_or(0);
 
-                                // P-State Throttling: Nur relevant wenn GPU aktiv arbeitet.
-                                // P8 bei 0% Utilization ist normaler Idle-Zustand.
+                                // P-State Throttling: Nur relevant wenn GPU aktiv arbeitet
+                                // UND sich in einem Throttle-State befindet (P4-P6).
+                                // P8+ ist normaler Idle-Zustand — kein Throttle-Indikator.
                                 let gpu_is_active = egpu_status.utilization_gpu_percent > 5
-                                    || egpu_status.memory_used_mb > 500;
+                                    || (egpu_status.memory_used_mb > 500 && egpu_status.utilization_gpu_percent > 0);
+                                let is_throttle_state = pstate_num >= config.gpu.pstate_throttle_threshold
+                                    && pstate_num < 8; // P8+ = Idle, kein Throttle
 
-                                if pstate_num >= config.gpu.pstate_throttle_threshold && gpu_is_active {
+                                if is_throttle_state && gpu_is_active {
                                     match pstate_p4_since {
                                         Some(since) => {
                                             let sustained = since.elapsed().as_secs();
