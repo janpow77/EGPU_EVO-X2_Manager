@@ -1,10 +1,18 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GtkBox, Button, CssProvider, Label, LevelBar, Notebook, Orientation, Separator,
-    StyleContext, Window, WindowType, ScrolledWindow,
+    Align, Box as GtkBox, Button, CssProvider, Image, Label, LevelBar, Notebook, Orientation,
+    Separator, StyleContext, Window, WindowType, ScrolledWindow,
 };
 
 use crate::state::{ConnectionState, GpuInfo, HealthScoreInfo, PipelineInfo, RemoteGpuInfo, WidgetState};
+
+/// Shared state to remember the active tab across redraws.
+thread_local! {
+    static ACTIVE_TAB: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+}
 
 const CSS: &str = r#"
 window {
@@ -135,6 +143,9 @@ pub fn build_popup() -> Window {
 }
 
 pub fn update_popup(window: &Window, state: &WidgetState) {
+    // Save current tab before destroying
+    let saved_tab = ACTIVE_TAB.with(|t| t.get());
+
     if let Some(child) = window.children().first() {
         window.remove(child);
     }
@@ -193,23 +204,29 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
 
     // Tab 1: GPU Status
     let tab1 = build_tab_status(state);
-    let tab1_label = Label::new(Some("GPU Status"));
-    tab1_label.style_context().add_class("tab-label");
-    notebook.append_page(&tab1, Some(&tab1_label));
+    let tab1_box = make_tab_label("video-display", "GPU Status");
+    notebook.append_page(&tab1, Some(&tab1_box));
 
     // Tab 2: Pipelines
     let tab2 = build_tab_pipelines(state);
-    let tab2_label = Label::new(Some(&format!("Pipelines ({})", state.pipelines.len())));
-    tab2_label.style_context().add_class("tab-label");
-    notebook.append_page(&tab2, Some(&tab2_label));
+    let tab2_box = make_tab_label("system-run", &format!("Pipelines ({})", state.pipelines.len()));
+    notebook.append_page(&tab2, Some(&tab2_box));
 
     // Tab 3: LLM Gateway
     let tab3 = build_tab_llm(state);
-    let tab3_label = Label::new(Some("LLM Gateway"));
-    tab3_label.style_context().add_class("tab-label");
-    notebook.append_page(&tab3, Some(&tab3_label));
+    let tab3_box = make_tab_label("network-server", "LLM Gateway");
+    notebook.append_page(&tab3, Some(&tab3_box));
 
     notebook.set_vexpand(true);
+
+    // Restore saved tab
+    notebook.set_current_page(Some(saved_tab));
+
+    // Save tab on switch
+    notebook.connect_switch_page(|_, _, page_num| {
+        ACTIVE_TAB.with(|t| t.set(page_num));
+    });
+
     outer.pack_start(&notebook, true, true, 0);
 
     // ── Footer: Open Web UI + Connection status ──
@@ -267,7 +284,7 @@ fn build_tab_status(state: &WidgetState) -> ScrolledWindow {
     if state.remote_gpus.is_empty() {
         let placeholder = GtkBox::new(Orientation::Horizontal, 6);
         placeholder.style_context().add_class("gpu-card");
-        let icon = Label::new(Some("\u{1F310}"));
+        let icon = Image::from_icon_name(Some("network-offline"), gtk::IconSize::Menu);
         placeholder.pack_start(&icon, false, false, 0);
         let lbl = Label::new(Some("LanGPU — nicht registriert"));
         lbl.style_context().add_class("muted");
@@ -437,6 +454,28 @@ fn build_tab_llm(state: &WidgetState) -> ScrolledWindow {
     scroll
 }
 
+// ── Helpers ──
+
+fn make_tab_label(icon_name: &str, text: &str) -> GtkBox {
+    let hbox = GtkBox::new(Orientation::Horizontal, 4);
+    let icon = Image::from_icon_name(Some(icon_name), gtk::IconSize::SmallToolbar);
+    hbox.pack_start(&icon, false, false, 0);
+    let label = Label::new(Some(text));
+    label.style_context().add_class("tab-label");
+    hbox.pack_start(&label, false, false, 0);
+    hbox.show_all();
+    hbox
+}
+
+fn gpu_icon_name(gpu_type: &str) -> &'static str {
+    match gpu_type {
+        "egpu" => "thunderbolt-symbolic",
+        "internal" => "video-display",
+        "remote" => "network-workgroup",
+        _ => "computer",
+    }
+}
+
 // ── Card builders ──
 
 fn build_gpu_card(gpu: &GpuInfo) -> GtkBox {
@@ -444,6 +483,11 @@ fn build_gpu_card(gpu: &GpuInfo) -> GtkBox {
     card.style_context().add_class("gpu-card");
 
     let header = GtkBox::new(Orientation::Horizontal, 6);
+
+    // GPU icon
+    let icon = Image::from_icon_name(Some(gpu_icon_name(&gpu.gpu_type)), gtk::IconSize::Menu);
+    header.pack_start(&icon, false, false, 0);
+
     let name = Label::new(Some(&gpu.name.replace("NVIDIA GeForce ", "")));
     name.style_context().add_class("gpu-name");
     name.set_hexpand(true);
@@ -515,6 +559,9 @@ fn build_pipeline_card(pipe: &PipelineInfo) -> GtkBox {
     card.style_context().add_class("pipe-card");
 
     let header = GtkBox::new(Orientation::Horizontal, 6);
+
+    let icon = Image::from_icon_name(Some("system-run-symbolic"), gtk::IconSize::Menu);
+    header.pack_start(&icon, false, false, 0);
 
     let name = Label::new(Some(&pipe.container));
     name.style_context().add_class("pipe-name");
@@ -626,7 +673,7 @@ fn build_remote_gpu_card(rgpu: &RemoteGpuInfo) -> GtkBox {
 
     let header = GtkBox::new(Orientation::Horizontal, 6);
 
-    let icon = Label::new(Some("\u{1F310}"));
+    let icon = Image::from_icon_name(Some("network-workgroup"), gtk::IconSize::Menu);
     header.pack_start(&icon, false, false, 0);
 
     let name_text = if rgpu.gpu_name.is_empty() {
