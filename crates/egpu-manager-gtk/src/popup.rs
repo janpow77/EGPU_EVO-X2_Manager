@@ -1,6 +1,6 @@
 use gtk::prelude::*;
 use gtk::{
-    Align, Box as GtkBox, Button, CssProvider, Label, LevelBar, Orientation, Separator,
+    Align, Box as GtkBox, Button, CssProvider, Label, LevelBar, Notebook, Orientation, Separator,
     StyleContext, Window, WindowType, ScrolledWindow,
 };
 
@@ -12,7 +12,7 @@ window {
     color: #e8e7e0;
 }
 .popup-container {
-    padding: 16px;
+    padding: 12px;
 }
 .section-title {
     font-size: 10px;
@@ -23,7 +23,7 @@ window {
 .status-bar {
     padding: 8px 12px;
     border-radius: 8px;
-    margin-bottom: 12px;
+    margin-bottom: 8px;
 }
 .status-green { background-color: rgba(34,197,94,0.15); }
 .status-yellow { background-color: rgba(234,179,8,0.15); }
@@ -88,6 +88,13 @@ window {
 .health-label { font-size: 10px; color: #9c9a92; }
 .health-score { font-size: 14px; font-weight: bold; }
 .health-events { font-size: 9px; color: #9c9a92; }
+.tab-label { font-size: 10px; font-weight: bold; }
+.llm-card { background-color: #2a2a27; border-radius: 6px; padding: 10px 12px; margin-bottom: 6px; }
+.llm-endpoint { font-size: 9px; color: #9c9a92; font-family: monospace; }
+.llm-stat { font-size: 10px; color: #e8e7e0; }
+notebook header { background-color: #1e1e1c; }
+notebook tab { padding: 4px 12px; color: #9c9a92; font-size: 10px; }
+notebook tab:checked { color: #00b0f0; border-bottom: 2px solid #00b0f0; }
 levelbar trough { min-height: 3px; border-radius: 2px; background-color: #1e1e1c; }
 levelbar block.filled { border-radius: 2px; background-color: #76b900; min-height: 3px; }
 separator { background-color: #444440; min-height: 1px; margin-top: 8px; margin-bottom: 8px; }
@@ -106,12 +113,11 @@ pub fn build_popup() -> Window {
 
     let window = Window::new(WindowType::Toplevel);
     window.set_title("eGPU Manager");
-    window.set_default_size(360, 480);
+    window.set_default_size(380, 520);
     window.set_resizable(false);
     window.set_type_hint(gtk::gdk::WindowTypeHint::Dialog);
     window.set_skip_taskbar_hint(true);
 
-    // Don't destroy on close, just hide
     window.connect_delete_event(|w, _| {
         w.hide();
         glib::Propagation::Stop
@@ -119,10 +125,6 @@ pub fn build_popup() -> Window {
 
     let container = GtkBox::new(Orientation::Vertical, 0);
     container.style_context().add_class("popup-container");
-
-    let title = Label::new(Some("eGPU MANAGER"));
-    title.style_context().add_class("section-title");
-    container.pack_start(&title, false, false, 0);
 
     let loading = Label::new(Some("Verbinde mit Daemon..."));
     loading.style_context().add_class("muted");
@@ -133,15 +135,14 @@ pub fn build_popup() -> Window {
 }
 
 pub fn update_popup(window: &Window, state: &WidgetState) {
-    // Remove old content
     if let Some(child) = window.children().first() {
         window.remove(child);
     }
 
-    let container = GtkBox::new(Orientation::Vertical, 0);
-    container.style_context().add_class("popup-container");
+    let outer = GtkBox::new(Orientation::Vertical, 0);
+    outer.style_context().add_class("popup-container");
 
-    // ── Status bar ──
+    // ── Status bar (always visible, above tabs) ──
     let status_box = GtkBox::new(Orientation::Horizontal, 8);
     let color = state.warning_color();
     status_box.style_context().add_class("status-bar");
@@ -161,7 +162,20 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
         lvl.style_context().add_class("status-label");
         status_box.pack_start(&lvl, false, false, 0);
 
-        let queue = Label::new(Some(&format!("Queue: {}", d.scheduler_queue_length)));
+        if let Some(ref hs) = state.health_score {
+            let score_lbl = Label::new(Some(&format!("Health: {:.0}", hs.score)));
+            score_lbl.style_context().add_class("gpu-stat-val");
+            if hs.score >= 80.0 {
+                score_lbl.style_context().add_class("green");
+            } else if hs.score >= 60.0 {
+                score_lbl.style_context().add_class("yellow");
+            } else {
+                score_lbl.style_context().add_class("red");
+            }
+            status_box.pack_start(&score_lbl, false, false, 0);
+        }
+
+        let queue = Label::new(Some(&format!("Q:{}", d.scheduler_queue_length)));
         queue.style_context().add_class("muted");
         queue.set_halign(Align::End);
         queue.set_hexpand(true);
@@ -171,86 +185,44 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
         lbl.style_context().add_class("muted");
         status_box.pack_start(&lbl, false, false, 0);
     }
-    container.pack_start(&status_box, false, false, 0);
+    outer.pack_start(&status_box, false, false, 0);
 
-    // ── Health Score ──
-    if let Some(ref hs) = state.health_score {
-        container.pack_start(&build_health_score_card(hs), false, false, 0);
-    }
+    // ── Notebook (Tabs) ──
+    let notebook = Notebook::new();
+    notebook.set_tab_pos(gtk::PositionType::Top);
 
-    // ── GPUs ──
-    let gpu_title = Label::new(Some("GPU STATUS"));
-    gpu_title.style_context().add_class("section-title");
-    gpu_title.set_halign(Align::Start);
-    container.pack_start(&gpu_title, false, false, 0);
+    // Tab 1: GPU Status
+    let tab1 = build_tab_status(state);
+    let tab1_label = Label::new(Some("GPU Status"));
+    tab1_label.style_context().add_class("tab-label");
+    notebook.append_page(&tab1, Some(&tab1_label));
 
-    for gpu in &state.gpus {
-        container.pack_start(&build_gpu_card(gpu), false, false, 0);
-    }
+    // Tab 2: Pipelines
+    let tab2 = build_tab_pipelines(state);
+    let tab2_label = Label::new(Some(&format!("Pipelines ({})", state.pipelines.len())));
+    tab2_label.style_context().add_class("tab-label");
+    notebook.append_page(&tab2, Some(&tab2_label));
 
-    // Remote GPUs (LanGPU) — always shown, even when offline
-    for rgpu in &state.remote_gpus {
-        container.pack_start(&build_remote_gpu_card(rgpu), false, false, 0);
-    }
+    // Tab 3: LLM Gateway
+    let tab3 = build_tab_llm(state);
+    let tab3_label = Label::new(Some("LLM Gateway"));
+    tab3_label.style_context().add_class("tab-label");
+    notebook.append_page(&tab3, Some(&tab3_label));
 
-    // If no remote GPUs registered but config might have one, show placeholder
-    if state.remote_gpus.is_empty() {
-        let placeholder = GtkBox::new(Orientation::Horizontal, 6);
-        placeholder.style_context().add_class("gpu-card");
+    notebook.set_vexpand(true);
+    outer.pack_start(&notebook, true, true, 0);
 
-        let icon = Label::new(Some("\u{1F310}"));
-        placeholder.pack_start(&icon, false, false, 0);
+    // ── Footer: Open Web UI + Connection status ──
+    let footer = GtkBox::new(Orientation::Horizontal, 8);
+    footer.set_margin_top(8);
 
-        let lbl = Label::new(Some("LanGPU — nicht registriert"));
-        lbl.style_context().add_class("muted");
-        placeholder.pack_start(&lbl, false, false, 0);
-
-        let badge = Label::new(Some("Offline"));
-        badge.style_context().add_class("gpu-badge");
-        badge.style_context().add_class("muted");
-        badge.set_halign(Align::End);
-        badge.set_hexpand(true);
-        placeholder.pack_start(&badge, true, true, 0);
-
-        container.pack_start(&placeholder, false, false, 0);
-    }
-
-    container.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
-
-    // ── Pipelines (top 3) ──
-    let pipe_title = Label::new(Some("PIPELINES"));
-    pipe_title.style_context().add_class("section-title");
-    pipe_title.set_halign(Align::Start);
-    container.pack_start(&pipe_title, false, false, 0);
-
-    let mut sorted: Vec<&PipelineInfo> = state.pipelines.iter().collect();
-    sorted.sort_by_key(|p| p.priority);
-
-    for pipe in sorted.iter().take(3) {
-        container.pack_start(&build_pipeline_card(pipe), false, false, 0);
-    }
-
-    if state.pipelines.len() > 3 {
-        let more = Label::new(Some(&format!(
-            "+ {} weitere",
-            state.pipelines.len() - 3
-        )));
-        more.style_context().add_class("muted");
-        more.set_margin_top(4);
-        container.pack_start(&more, false, false, 0);
-    }
-
-    container.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
-
-    // ── Open Web UI button ──
-    let btn = Button::with_label("Weboberflaeche oeffnen");
+    let btn = Button::with_label("Web-UI");
     btn.style_context().add_class("open-btn");
     btn.connect_clicked(|_| {
         let _ = open::that("http://127.0.0.1:7842");
     });
-    container.pack_start(&btn, false, false, 0);
+    footer.pack_start(&btn, false, false, 0);
 
-    // ── Connection status ──
     let conn_text = match &state.connection {
         ConnectionState::Connected => "\u{25CF} Verbunden".to_string(),
         ConnectionState::Connecting => "\u{25CB} Verbinde...".to_string(),
@@ -259,16 +231,213 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
     };
     let conn_label = Label::new(Some(&conn_text));
     conn_label.style_context().add_class("conn-status");
-    conn_label.set_margin_top(8);
-    conn_label.set_halign(Align::Center);
-    container.pack_start(&conn_label, false, false, 0);
+    conn_label.set_halign(Align::End);
+    conn_label.set_hexpand(true);
+    footer.pack_start(&conn_label, true, true, 0);
 
-    let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-    scroll.add(&container);
-    scroll.set_vexpand(true);
-    window.add(&scroll);
+    outer.pack_start(&footer, false, false, 0);
+
+    window.add(&outer);
     window.show_all();
 }
+
+// ── Tab 1: GPU Status ──
+
+fn build_tab_status(state: &WidgetState) -> ScrolledWindow {
+    let content = GtkBox::new(Orientation::Vertical, 4);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
+    content.set_margin_top(8);
+
+    // Health Score bar
+    if let Some(ref hs) = state.health_score {
+        content.pack_start(&build_health_score_card(hs), false, false, 0);
+    }
+
+    // GPUs
+    for gpu in &state.gpus {
+        content.pack_start(&build_gpu_card(gpu), false, false, 0);
+    }
+
+    // Remote GPUs
+    for rgpu in &state.remote_gpus {
+        content.pack_start(&build_remote_gpu_card(rgpu), false, false, 0);
+    }
+
+    if state.remote_gpus.is_empty() {
+        let placeholder = GtkBox::new(Orientation::Horizontal, 6);
+        placeholder.style_context().add_class("gpu-card");
+        let icon = Label::new(Some("\u{1F310}"));
+        placeholder.pack_start(&icon, false, false, 0);
+        let lbl = Label::new(Some("LanGPU — nicht registriert"));
+        lbl.style_context().add_class("muted");
+        placeholder.pack_start(&lbl, false, false, 0);
+        content.pack_start(&placeholder, false, false, 0);
+    }
+
+    let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    scroll.add(&content);
+    scroll
+}
+
+// ── Tab 2: Pipelines (ALLE) ──
+
+fn build_tab_pipelines(state: &WidgetState) -> ScrolledWindow {
+    let content = GtkBox::new(Orientation::Vertical, 4);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
+    content.set_margin_top(8);
+
+    if state.pipelines.is_empty() {
+        let empty = Label::new(Some("Keine Pipelines konfiguriert"));
+        empty.style_context().add_class("muted");
+        empty.set_margin_top(20);
+        content.pack_start(&empty, false, false, 0);
+    } else {
+        let mut sorted: Vec<&PipelineInfo> = state.pipelines.iter().collect();
+        sorted.sort_by_key(|p| p.priority);
+
+        for pipe in &sorted {
+            content.pack_start(&build_pipeline_card(pipe), false, false, 0);
+        }
+
+        // Summary
+        content.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
+
+        let summary = GtkBox::new(Orientation::Horizontal, 12);
+        let total = Label::new(Some(&format!("{} Pipelines", state.pipelines.len())));
+        total.style_context().add_class("gpu-stat");
+        summary.pack_start(&total, false, false, 0);
+
+        let on_egpu = sorted.iter().filter(|p| p.gpu_type == "egpu").count();
+        let on_internal = sorted.iter().filter(|p| p.gpu_type == "internal").count();
+        let status_text = format!("eGPU: {}  Intern: {}", on_egpu, on_internal);
+        let status_lbl = Label::new(Some(&status_text));
+        status_lbl.style_context().add_class("gpu-stat-val");
+        status_lbl.set_halign(Align::End);
+        status_lbl.set_hexpand(true);
+        summary.pack_start(&status_lbl, true, true, 0);
+
+        content.pack_start(&summary, false, false, 0);
+    }
+
+    let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    scroll.add(&content);
+    scroll
+}
+
+// ── Tab 3: LLM Gateway ──
+
+fn build_tab_llm(state: &WidgetState) -> ScrolledWindow {
+    let content = GtkBox::new(Orientation::Vertical, 4);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
+    content.set_margin_top(8);
+
+    let card = GtkBox::new(Orientation::Vertical, 4);
+    card.style_context().add_class("llm-card");
+
+    let header = GtkBox::new(Orientation::Horizontal, 8);
+    let title = Label::new(Some("LLM Gateway"));
+    title.style_context().add_class("gpu-name");
+    header.pack_start(&title, false, false, 0);
+
+    let connected = state.daemon.is_some();
+    let status_text = if connected { "\u{25CF} Aktiv" } else { "\u{25CB} Offline" };
+    let status = Label::new(Some(status_text));
+    status.style_context().add_class(if connected { "green" } else { "muted" });
+    status.set_halign(Align::End);
+    status.set_hexpand(true);
+    header.pack_start(&status, true, true, 0);
+    card.pack_start(&header, false, false, 0);
+
+    let endpoint = Label::new(Some("http://localhost:7842/api/llm/chat/completions"));
+    endpoint.style_context().add_class("llm-endpoint");
+    endpoint.set_halign(Align::Start);
+    endpoint.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    endpoint.set_max_width_chars(45);
+    card.pack_start(&endpoint, false, false, 0);
+
+    content.pack_start(&card, false, false, 0);
+
+    // Connected apps
+    let apps_title = Label::new(Some("ANGEBUNDENE APPS"));
+    apps_title.style_context().add_class("section-title");
+    apps_title.set_halign(Align::Start);
+    apps_title.set_margin_top(8);
+    content.pack_start(&apps_title, false, false, 0);
+
+    let apps = [
+        ("audit_designer", "Vue 3", "Prüfungs-Designer"),
+        ("flowinvoice", "React", "Rechnungsverarbeitung"),
+        ("flownavigator", "Vue 3", "Modul-Konverter"),
+        ("regulierung", "React", "Regulierungs-Analyse"),
+        ("flowaudit", "React", "Vorhabensprüfung"),
+    ];
+
+    for (app_id, framework, desc) in &apps {
+        let row = GtkBox::new(Orientation::Horizontal, 8);
+        row.style_context().add_class("pipe-card");
+
+        let name = Label::new(Some(app_id));
+        name.style_context().add_class("pipe-name");
+        row.pack_start(&name, false, false, 0);
+
+        let fw = Label::new(Some(framework));
+        fw.style_context().add_class("pipe-project");
+        row.pack_start(&fw, false, false, 0);
+
+        let description = Label::new(Some(desc));
+        description.style_context().add_class("gpu-stat");
+        description.set_halign(Align::End);
+        description.set_hexpand(true);
+        description.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        row.pack_start(&description, true, true, 0);
+
+        content.pack_start(&row, false, false, 0);
+    }
+
+    // Supported providers
+    content.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
+
+    let prov_title = Label::new(Some("LLM PROVIDER"));
+    prov_title.style_context().add_class("section-title");
+    prov_title.set_halign(Align::Start);
+    content.pack_start(&prov_title, false, false, 0);
+
+    let providers = [
+        ("Ollama (Lokal)", "qwen3:14b", "badge-egpu"),
+        ("Anthropic", "Claude Sonnet/Opus", "muted"),
+        ("OpenAI", "GPT-4o", "muted"),
+        ("Gemini", "1.5 Pro/Flash", "muted"),
+    ];
+
+    for (name, model, badge_class) in &providers {
+        let row = GtkBox::new(Orientation::Horizontal, 8);
+
+        let name_lbl = Label::new(Some(name));
+        name_lbl.style_context().add_class("gpu-stat-val");
+        row.pack_start(&name_lbl, false, false, 0);
+
+        let model_lbl = Label::new(Some(model));
+        model_lbl.style_context().add_class("gpu-stat");
+        model_lbl.set_halign(Align::End);
+        model_lbl.set_hexpand(true);
+        row.pack_start(&model_lbl, true, true, 0);
+
+        let dot = Label::new(Some("\u{25CF}"));
+        dot.style_context().add_class(badge_class);
+        row.pack_start(&dot, false, false, 0);
+
+        content.pack_start(&row, false, false, 0);
+    }
+
+    let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
+    scroll.add(&content);
+    scroll
+}
+
+// ── Card builders ──
 
 fn build_gpu_card(gpu: &GpuInfo) -> GtkBox {
     let card = GtkBox::new(Orientation::Vertical, 4);
