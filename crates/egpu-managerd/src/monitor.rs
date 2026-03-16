@@ -520,30 +520,26 @@ impl MonitorOrchestrator {
                                     .parse::<u32>()
                                     .unwrap_or(0);
 
-                                if pstate_num >= config.gpu.pstate_throttle_threshold {
+                                // P-State Throttling: Nur relevant wenn GPU aktiv arbeitet.
+                                // P8 bei 0% Utilization ist normaler Idle-Zustand.
+                                let gpu_is_active = egpu_status.utilization_gpu_percent > 5
+                                    || egpu_status.memory_used_mb > 500;
+
+                                if pstate_num >= config.gpu.pstate_throttle_threshold && gpu_is_active {
                                     match pstate_p4_since {
                                         Some(since) => {
                                             let sustained = since.elapsed().as_secs();
                                             if sustained >= config.gpu.pstate_throttle_sustained_seconds {
                                                 warn!(
-                                                    "P-State P{} sustained {}s (Schwelle: {}s)",
+                                                    "P-State P{} sustained {}s bei aktiver GPU ({}%) — Anomalie",
                                                     pstate_num, sustained,
-                                                    config.gpu.pstate_throttle_sustained_seconds
+                                                    egpu_status.utilization_gpu_percent
                                                 );
                                                 let _ = trigger_tx.send(WarningTrigger::PstateThrottle).await;
                                                 let mut st = state.lock().await;
                                                 st.health_score.record_event(HealthEventKind::PstateAnomaly);
-                                            }
-
-                                            // P8 with active workloads is especially concerning
-                                            if pstate_num >= 8 && egpu_status.utilization_gpu_percent > 0 {
-                                                warn!(
-                                                    "P-State P{} bei aktiver GPU-Nutzung ({}%) — Anomalie",
-                                                    pstate_num, egpu_status.utilization_gpu_percent
-                                                );
-                                                let _ = trigger_tx.send(WarningTrigger::PstateThrottle).await;
-                                                let mut st = state.lock().await;
-                                                st.health_score.record_event(HealthEventKind::PstateAnomaly);
+                                                // Timer reset um nicht jede Sekunde zu feuern
+                                                pstate_p4_since = Some(std::time::Instant::now());
                                             }
                                         }
                                         None => {

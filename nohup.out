@@ -4,3 +4,6 @@
 [2m2026-03-16T10:03:59.969227Z[0m [32m INFO[0m [2megpu_manager_widget[0m[2m:[0m eGPU Manager Widget startet
 [2m2026-03-16T10:03:59.998633Z[0m [32m INFO[0m [2megpu_manager_widget::tray[0m[2m:[0m Tray-Icon registriert
 [2m2026-03-16T10:03:59.998682Z[0m [32m INFO[0m [2megpu_manager_widget[0m[2m:[0m Widget gestartet — Tray-Icon aktiv
+[2m2026-03-16T10:08:39.888221Z[0m [32m INFO[0m [2megpu_manager_widget[0m[2m:[0m eGPU Manager Widget startet
+[2m2026-03-16T10:08:39.919778Z[0m [32m INFO[0m [2megpu_manager_widget::tray[0m[2m:[0m Tray-Icon registriert
+[2m2026-03-16T10:08:39.919839Z[0m [32m INFO[0m [2megpu_manager_widget[0m[2m:[0m Widget gestartet — Tray-Icon aktiv
