@@ -86,6 +86,36 @@ impl KmsgMonitor {
         }
     }
 
+    /// Check if a kernel log line contains an NVIDIA Xid error for our GPU.
+    /// Pattern: "NVRM: Xid (PCI:XXXX:XX:XX): <id>,"
+    /// Returns Some(xid_number) if matched, None otherwise.
+    pub fn matches_xid_error(&self, line: &str) -> Option<u32> {
+        if !line.contains("NVRM") || !line.contains("Xid") {
+            return None;
+        }
+
+        // Check PCI address match
+        if !self.line_matches_pci(line) {
+            // Also check PCI format used in Xid messages: "PCI:0000:05:00"
+            let pci_short = self.pci_address.trim_end_matches(".0");
+            if !line.contains(&format!("PCI:{}", pci_short))
+                && !line.contains(&format!("PCI:{}", self.pci_address))
+            {
+                return None;
+            }
+        }
+
+        // Extract Xid number: "Xid (PCI:...): <number>,"
+        // Pattern: after "): " find the number before ","
+        if let Some(xid_start) = line.find("): ") {
+            let after = &line[xid_start + 3..];
+            let xid_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            return xid_str.parse().ok();
+        }
+
+        None
+    }
+
     /// Check if a kernel log line matches our PCI address (full or short form).
     fn line_matches_pci(&self, line: &str) -> bool {
         if line.contains(&self.pci_address) {
@@ -170,6 +200,12 @@ impl KmsgMonitor {
                             } else if self.matches_gpu_progress_error(&line) {
                                 error!("GPU-Progress-Error in Kernel-Log erkannt: {}", line);
                                 if trigger_tx.send(WarningTrigger::GpuProgressError).await.is_err() {
+                                    error!("Trigger-Kanal geschlossen");
+                                    return;
+                                }
+                            } else if let Some(xid) = self.matches_xid_error(&line) {
+                                warn!("NVIDIA Xid {xid} in Kernel-Log erkannt: {}", line);
+                                if trigger_tx.send(WarningTrigger::XidError { xid }).await.is_err() {
                                     error!("Trigger-Kanal geschlossen");
                                     return;
                                 }
@@ -286,5 +322,62 @@ mod tests {
         assert!(!monitor.matches_gpu_progress_error(
             "nvidia-modeset: ERROR: GPU:1: Idling display engine timed out"
         ));
+    }
+
+    #[test]
+    fn test_xid_79_gpu_fallen_off_bus() {
+        let monitor = KmsgMonitor::new("0000:05:00.0".to_string());
+        assert_eq!(
+            monitor.matches_xid_error(
+                "NVRM: Xid (PCI:0000:05:00): 79, pid=1234, GPU has fallen off the bus"
+            ),
+            Some(79)
+        );
+    }
+
+    #[test]
+    fn test_xid_48_ecc_error() {
+        let monitor = KmsgMonitor::new("0000:05:00.0".to_string());
+        assert_eq!(
+            monitor.matches_xid_error(
+                "NVRM: Xid (PCI:0000:05:00): 48, pid=0, ECC error"
+            ),
+            Some(48)
+        );
+    }
+
+    #[test]
+    fn test_xid_wrong_pci() {
+        let monitor = KmsgMonitor::new("0000:05:00.0".to_string());
+        // Different PCI address should NOT match
+        assert_eq!(
+            monitor.matches_xid_error(
+                "NVRM: Xid (PCI:0000:02:00): 79, pid=1234, GPU has fallen off the bus"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_xid_no_nvrm() {
+        let monitor = KmsgMonitor::new("0000:05:00.0".to_string());
+        // Non-Xid NVRM messages should not match
+        assert_eq!(
+            monitor.matches_xid_error(
+                "NVRM: GPU 0000:05:00.0: RmInitAdapter failed!"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_xid_13_graphics_engine() {
+        let monitor = KmsgMonitor::new("0000:05:00.0".to_string());
+        assert_eq!(
+            monitor.matches_xid_error(
+                "NVRM: Xid (PCI:0000:05:00): 13, pid=5678, Graphics Engine Exception"
+            ),
+            Some(13)
+        );
     }
 }

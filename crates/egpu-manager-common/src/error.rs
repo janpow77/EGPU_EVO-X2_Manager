@@ -28,6 +28,9 @@ pub enum GpuError {
 
     #[error("GPU {pci_address} nicht gefunden")]
     GpuNotFound { pci_address: String },
+
+    #[error("NVML-Fehler: {0}")]
+    NvmlError(String),
 }
 
 #[derive(Error, Debug)]

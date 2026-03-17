@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 /// Triggers that can cause warning level transitions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub enum WarningTrigger {
     /// AER error count exceeded sustained threshold over window
     AerThreshold,
@@ -26,6 +26,8 @@ pub enum WarningTrigger {
     CudaWatchdogTimeout,
     /// nvidia-modeset GPU progress error — GPU hang imminent, highest severity
     GpuProgressError,
+    /// NVIDIA Xid error detected in kernel log
+    XidError { xid: u32 },
     /// GPU temperature reached throttle threshold
     ThermalThrottle,
     /// GPU temperature reached critical threshold
@@ -42,6 +44,32 @@ pub enum WarningTrigger {
     AllClear,
 }
 
+impl PartialEq for WarningTrigger {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            // XidError equals any other XidError regardless of xid number (for trigger dedup)
+            (WarningTrigger::XidError { .. }, WarningTrigger::XidError { .. }) => true,
+            (WarningTrigger::AerThreshold, WarningTrigger::AerThreshold) => true,
+            (WarningTrigger::AerBurst, WarningTrigger::AerBurst) => true,
+            (WarningTrigger::LinkWidthDegradation, WarningTrigger::LinkWidthDegradation) => true,
+            (WarningTrigger::LinkSpeedDegradation, WarningTrigger::LinkSpeedDegradation) => true,
+            (WarningTrigger::LinkDown, WarningTrigger::LinkDown) => true,
+            (WarningTrigger::NvidiaSmiTimeout, WarningTrigger::NvidiaSmiTimeout) => true,
+            (WarningTrigger::CmpltToPattern, WarningTrigger::CmpltToPattern) => true,
+            (WarningTrigger::CudaWatchdogTimeout, WarningTrigger::CudaWatchdogTimeout) => true,
+            (WarningTrigger::GpuProgressError, WarningTrigger::GpuProgressError) => true,
+            (WarningTrigger::ThermalThrottle, WarningTrigger::ThermalThrottle) => true,
+            (WarningTrigger::ThermalCritical, WarningTrigger::ThermalCritical) => true,
+            (WarningTrigger::PstateThrottle, WarningTrigger::PstateThrottle) => true,
+            (WarningTrigger::NvidiaSmiSlow, WarningTrigger::NvidiaSmiSlow) => true,
+            (WarningTrigger::HealthScoreLow, WarningTrigger::HealthScoreLow) => true,
+            (WarningTrigger::HealthScoreCritical, WarningTrigger::HealthScoreCritical) => true,
+            (WarningTrigger::AllClear, WarningTrigger::AllClear) => true,
+            _ => false,
+        }
+    }
+}
+
 impl std::fmt::Display for WarningTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -54,6 +82,7 @@ impl std::fmt::Display for WarningTrigger {
             WarningTrigger::CmpltToPattern => write!(f, "CmpltTO in Kernel-Log"),
             WarningTrigger::CudaWatchdogTimeout => write!(f, "CUDA-Watchdog Timeout"),
             WarningTrigger::GpuProgressError => write!(f, "GPU-Progress-Error (nvidia-modeset Hang)"),
+            WarningTrigger::XidError { xid } => write!(f, "Xid {xid}"),
             WarningTrigger::ThermalThrottle => write!(f, "GPU-Temperatur Throttle-Schwelle erreicht"),
             WarningTrigger::ThermalCritical => write!(f, "GPU-Temperatur kritisch"),
             WarningTrigger::PstateThrottle => write!(f, "P-State Throttling erkannt"),
@@ -78,6 +107,14 @@ impl WarningTrigger {
             WarningTrigger::CmpltToPattern => WarningLevel::Orange,
             WarningTrigger::CudaWatchdogTimeout => WarningLevel::Orange,
             WarningTrigger::GpuProgressError => WarningLevel::Red,
+            WarningTrigger::XidError { xid } => match xid {
+                // Critical Xid errors → Red
+                43 | 45 | 48 | 79 => WarningLevel::Red,
+                // Severe errors → Orange
+                13 | 31 | 61 | 62 | 69 => WarningLevel::Orange,
+                // Moderate errors → Yellow
+                _ => WarningLevel::Yellow,
+            },
             WarningTrigger::ThermalThrottle => WarningLevel::Yellow,
             WarningTrigger::ThermalCritical => WarningLevel::Orange,
             WarningTrigger::PstateThrottle => WarningLevel::Yellow,
@@ -701,5 +738,29 @@ mod tests {
         let mut sm = WarningStateMachine::new(120);
         let result = sm.process_trigger(WarningTrigger::HealthScoreCritical);
         assert_eq!(result, Some(WarningLevel::Orange));
+    }
+
+    #[test]
+    fn test_xid_79_goes_red() {
+        let mut sm = WarningStateMachine::new(120);
+        let result = sm.process_trigger(WarningTrigger::XidError { xid: 79 });
+        assert_eq!(result, Some(WarningLevel::Red));
+        assert_eq!(sm.current_level(), WarningLevel::Red);
+    }
+
+    #[test]
+    fn test_xid_13_goes_orange() {
+        let mut sm = WarningStateMachine::new(120);
+        let result = sm.process_trigger(WarningTrigger::XidError { xid: 13 });
+        assert_eq!(result, Some(WarningLevel::Orange));
+        assert_eq!(sm.current_level(), WarningLevel::Orange);
+    }
+
+    #[test]
+    fn test_xid_unknown_goes_yellow() {
+        let mut sm = WarningStateMachine::new(120);
+        let result = sm.process_trigger(WarningTrigger::XidError { xid: 999 });
+        assert_eq!(result, Some(WarningLevel::Yellow));
+        assert_eq!(sm.current_level(), WarningLevel::Yellow);
     }
 }

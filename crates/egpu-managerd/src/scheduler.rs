@@ -159,6 +159,38 @@ impl VramScheduler {
         self.compute_utilization.insert(gpu, percent);
     }
 
+    /// Dynamisch die Display-VRAM-Reservierung einer GPU aktualisieren.
+    /// Wird im GPU-Poller aufgerufen, um die tatsaechliche Display-Nutzung
+    /// statt eines statischen Config-Werts zu verwenden.
+    pub fn update_display_reserve(&mut self, target: GpuTarget, reserve_mb: u64) {
+        let capacity = match target {
+            GpuTarget::Egpu => &mut self.egpu_capacity,
+            GpuTarget::Internal => &mut self.internal_capacity,
+        };
+        if capacity.display_reserve_mb != reserve_mb {
+            debug!(
+                "Display-Reserve {} aktualisiert: {} MB -> {} MB",
+                target, capacity.display_reserve_mb, reserve_mb
+            );
+            capacity.display_reserve_mb = reserve_mb;
+        }
+    }
+
+    /// Dynamisch den Gesamt-VRAM einer GPU aktualisieren (von nvidia-smi).
+    pub fn update_total_vram(&mut self, target: GpuTarget, total_mb: u64) {
+        let capacity = match target {
+            GpuTarget::Egpu => &mut self.egpu_capacity,
+            GpuTarget::Internal => &mut self.internal_capacity,
+        };
+        if capacity.total_vram_mb != total_mb {
+            debug!(
+                "Gesamt-VRAM {} aktualisiert: {} MB -> {} MB",
+                target, capacity.total_vram_mb, total_mb
+            );
+            capacity.total_vram_mb = total_mb;
+        }
+    }
+
     /// Set the manual eGPU admission state.
     pub fn set_admission_state(&mut self, state: AdmissionState) {
         info!("eGPU-Admission geaendert: {}", state);
@@ -555,8 +587,8 @@ impl VramScheduler {
             })
             .collect();
 
-        // Sort by priority descending (preempt lowest priority first)
-        preemptable.sort_by(|a, b| b.1.cmp(&a.1));
+        // Sort by: 1) priority descending (lowest importance first), 2) VRAM ascending (smallest first)
+        preemptable.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
 
         let mut freed: u64 = self.vram_available(target);
         let mut preempted = Vec::new();
@@ -605,6 +637,27 @@ impl VramScheduler {
         // Sort by priority descending (highest number = lowest importance = shed first)
         candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
         candidates
+    }
+
+    /// Atomically schedule multiple requests. If any fails, rollback all.
+    pub fn schedule_multi_gpu(&mut self, requests: Vec<ScheduleRequest>) -> Result<Vec<ScheduleResult>, String> {
+        let snapshot_assignments = self.assignments.clone();
+        let snapshot_leases = self.lease_reservations.clone();
+        let snapshot_queue = self.queue.clone();
+
+        let mut results = Vec::new();
+        for req in &requests {
+            let result = self.schedule(req.clone());
+            if matches!(result, ScheduleResult::Queued) {
+                // Rollback
+                self.assignments = snapshot_assignments;
+                self.lease_reservations = snapshot_leases;
+                self.queue = snapshot_queue;
+                return Err(format!("Multi-GPU Scheduling fehlgeschlagen fuer {}: kein VRAM", req.name));
+            }
+            results.push(result);
+        }
+        Ok(results)
     }
 
     #[allow(dead_code)]
@@ -938,6 +991,37 @@ mod tests {
     }
 
     #[test]
+    fn test_dynamic_display_reserve_update() {
+        let mut sched = make_scheduler();
+        // Initial: 8000 - 512 = 7488 available
+        assert_eq!(sched.vram_available(GpuTarget::Internal), 7488);
+
+        // Simuliere: Display belegt 7000 MB + 512 MB Headroom = 7512 MB Reserve
+        sched.update_display_reserve(GpuTarget::Internal, 7512);
+        // 8000 - 7512 = 488 MB verfuegbar
+        assert_eq!(sched.vram_available(GpuTarget::Internal), 488);
+
+        // Ein Workload mit 2000 MB kann nicht auf die interne GPU
+        let result = sched.schedule(ScheduleRequest {
+            name: "too_big".to_string(),
+            priority: 1,
+            vram_estimate_mb: 2000,
+            preferred_target: GpuTarget::Internal,
+        });
+        // Sollte auf eGPU ausweichen
+        assert_eq!(result, ScheduleResult::Assigned(GpuTarget::Egpu));
+    }
+
+    #[test]
+    fn test_dynamic_total_vram_update() {
+        let mut sched = make_scheduler();
+        // nvidia-smi meldet tatsaechlich 8151 MB statt der initialen 8000
+        sched.update_total_vram(GpuTarget::Internal, 8151);
+        // 8151 - 512 reserve = 7639 available
+        assert_eq!(sched.vram_available(GpuTarget::Internal), 7639);
+    }
+
+    #[test]
     fn test_compute_utilization_blocks() {
         let mut sched = make_scheduler();
         sched.set_compute_utilization(GpuTarget::Egpu, 95);
@@ -1019,5 +1103,105 @@ mod tests {
         assert_eq!(sched.assignments()["worker"].actual_vram_mb, 3500);
         // VRAM used should now reflect actual
         assert_eq!(sched.vram_used(GpuTarget::Egpu), 3500);
+    }
+
+    #[test]
+    fn test_preemption_prefers_smallest_sufficient() {
+        let mut sched = make_scheduler();
+        // Two low-prio tasks on eGPU filling it completely (16000 MB)
+        sched.schedule(ScheduleRequest {
+            name: "small".to_string(),
+            priority: 5,
+            vram_estimate_mb: 4000,
+            preferred_target: GpuTarget::Egpu,
+        });
+        sched.schedule(ScheduleRequest {
+            name: "large".to_string(),
+            priority: 5,
+            vram_estimate_mb: 12000,
+            preferred_target: GpuTarget::Egpu,
+        });
+        // Also fill internal GPU so fallback is not possible
+        sched.schedule(ScheduleRequest {
+            name: "internal_fill".to_string(),
+            priority: 1,
+            vram_estimate_mb: 7488,
+            preferred_target: GpuTarget::Internal,
+        });
+
+        // High-prio needs 3000 MB — should preempt "small" first (4000 MB, smallest),
+        // which frees enough VRAM
+        let result = sched.schedule(ScheduleRequest {
+            name: "urgent".to_string(),
+            priority: 1,
+            vram_estimate_mb: 3000,
+            preferred_target: GpuTarget::Egpu,
+        });
+
+        match result {
+            ScheduleResult::PreemptedAndAssigned { target, preempted } => {
+                assert_eq!(target, GpuTarget::Egpu);
+                // Should preempt smallest first (4000 MB frees enough for 3000 MB)
+                assert!(preempted.contains(&"small".to_string()));
+                // Should NOT need to preempt the large one
+                assert!(!preempted.contains(&"large".to_string()));
+            }
+            other => panic!("Expected PreemptedAndAssigned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_multi_gpu_atomic_rollback() {
+        let mut sched = make_scheduler();
+        // Fill most of eGPU
+        sched.schedule(ScheduleRequest {
+            name: "existing".to_string(),
+            priority: 1,
+            vram_estimate_mb: 14000,
+            preferred_target: GpuTarget::Egpu,
+        });
+
+        // Try to schedule 2 tasks atomically — second should fail
+        let result = sched.schedule_multi_gpu(vec![
+            ScheduleRequest {
+                name: "multi_a".to_string(),
+                priority: 2,
+                vram_estimate_mb: 2000,
+                preferred_target: GpuTarget::Internal,
+            },
+            ScheduleRequest {
+                name: "multi_b".to_string(),
+                priority: 2,
+                vram_estimate_mb: 20000, // Too large for any GPU
+                preferred_target: GpuTarget::Egpu,
+            },
+        ]);
+
+        assert!(result.is_err());
+        // Verify rollback: multi_a should NOT be assigned
+        assert!(!sched.assignments().contains_key("multi_a"));
+    }
+
+    #[test]
+    fn test_multi_gpu_success() {
+        let mut sched = make_scheduler();
+        let result = sched.schedule_multi_gpu(vec![
+            ScheduleRequest {
+                name: "gpu_a".to_string(),
+                priority: 1,
+                vram_estimate_mb: 4000,
+                preferred_target: GpuTarget::Egpu,
+            },
+            ScheduleRequest {
+                name: "gpu_b".to_string(),
+                priority: 1,
+                vram_estimate_mb: 3000,
+                preferred_target: GpuTarget::Internal,
+            },
+        ]);
+
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert_eq!(results.len(), 2);
     }
 }

@@ -30,6 +30,9 @@ pub struct GpuStatus {
     pub clock_memory_mhz: u32,
     pub throttle_reason: String,
     pub status: GpuOnlineStatus,
+    /// NUMA node from sysfs, informational for future scheduler use
+    #[serde(default)]
+    pub numa_node: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

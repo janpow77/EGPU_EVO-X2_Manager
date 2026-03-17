@@ -18,6 +18,7 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
 
 use crate::db::EventDb;
+use crate::metrics::MetricsState;
 use crate::monitor::MonitorState;
 use crate::web::sse::SseBroadcaster;
 
@@ -29,6 +30,7 @@ pub struct AppState {
     pub sse: SseBroadcaster,
     pub started_at: Instant,
     pub llm_router: Option<Arc<crate::llm::router::LlmRouter>>,
+    pub metrics_state: Option<Arc<Mutex<MetricsState>>>,
 }
 
 /// Serve the embedded HTML UI at root.
@@ -38,6 +40,33 @@ async fn serve_index() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         Html(ui::INDEX_HTML),
     )
+}
+
+/// Prometheus metrics endpoint.
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse {
+    if let Some(ref ms) = state.metrics_state {
+        let locked = ms.lock().await;
+        let body = locked.encode();
+        (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
+            body,
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(
+                header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            )],
+            "# Metrics not initialized\n".to_string(),
+        )
+    }
 }
 
 /// Build the Axum router with all API routes.
@@ -95,7 +124,9 @@ fn build_router(state: Arc<AppState>) -> Router {
         )
         // GPU acquire/release/recommend (Gap 4)
         .route("/api/gpu/acquire", post(api::post_gpu_acquire))
+        .route("/api/gpu/acquire-multi", post(api::post_gpu_acquire_multi))
         .route("/api/gpu/release", post(api::post_gpu_release))
+        .route("/api/gpu/heartbeat", post(api::post_gpu_heartbeat))
         .route("/api/gpu/recommend", get(api::get_gpu_recommend))
         // eGPU admission control
         .route("/api/egpu/admission", post(api::post_egpu_admission))
@@ -126,6 +157,8 @@ fn build_router(state: Arc<AppState>) -> Router {
         // Setup generator (Windows Remote-Node)
         .route("/api/setup/generate", post(api::post_setup_generate))
         .route("/api/setup/instructions", get(api::get_setup_instructions))
+        // Prometheus Metrics
+        .route("/metrics", get(metrics_handler))
         // LLM Gateway
         .route(
             "/api/llm/chat/completions",
@@ -152,6 +185,7 @@ pub async fn start_web_server(
     monitor_state: Arc<Mutex<MonitorState>>,
     cancel: CancellationToken,
     sse: SseBroadcaster,
+    metrics_state: Option<Arc<Mutex<MetricsState>>>,
 ) {
     // LLM Gateway initialisieren falls konfiguriert
     let llm_router = config
@@ -181,6 +215,7 @@ pub async fn start_web_server(
         sse,
         started_at: Instant::now(),
         llm_router,
+        metrics_state,
     });
 
     let router = build_router(state);
@@ -211,6 +246,7 @@ mod tests {
     use crate::monitor::RegisteredRemoteGpu;
     use crate::scheduler::{GpuCapacity, VramScheduler};
     use crate::warning::WarningStateMachine;
+    use egpu_manager_common::gpu::{GpuOnlineStatus, GpuStatus, GpuType};
     use axum::body::Body;
     use axum::http::Request;
     use chrono::Utc;
@@ -241,11 +277,40 @@ mod tests {
         );
         let health_score =
             crate::health_score::LinkHealthScore::new(3.0, 5.0, 2.0, 5.0, 1.0, 60.0, 40.0);
+        // Realistic GPU status so Thunderbolt pre-flight checks pass
+        let gpu_status = vec![
+            GpuStatus {
+                pci_address: "0000:02:00.0".to_string(),
+                nvidia_index: Some(0),
+                gpu_uuid: "GPU-internal-test".to_string(),
+                name: "Test Internal GPU".to_string(),
+                gpu_type: GpuType::Internal,
+                temperature_c: 40, utilization_gpu_percent: 0,
+                memory_used_mb: 512, memory_free_mb: 7488, memory_total_mb: 8000,
+                power_draw_w: 5.0, pstate: "P8".to_string(), fan_speed_percent: 0,
+                clock_graphics_mhz: 210, clock_memory_mhz: 405,
+                throttle_reason: "All On".to_string(), status: GpuOnlineStatus::Online,
+                numa_node: None,
+            },
+            GpuStatus {
+                pci_address: "0000:05:00.0".to_string(),
+                nvidia_index: Some(1),
+                gpu_uuid: "GPU-egpu-test".to_string(),
+                name: "Test eGPU".to_string(),
+                gpu_type: GpuType::Egpu,
+                temperature_c: 30, utilization_gpu_percent: 0,
+                memory_used_mb: 0, memory_free_mb: 16000, memory_total_mb: 16000,
+                power_draw_w: 15.0, pstate: "P8".to_string(), fan_speed_percent: 30,
+                clock_graphics_mhz: 210, clock_memory_mhz: 405,
+                throttle_reason: "All On".to_string(), status: GpuOnlineStatus::Online,
+                numa_node: None,
+            },
+        ];
         let monitor_state = Arc::new(Mutex::new(MonitorState {
             warning_machine,
             scheduler,
             health_score,
-            gpu_status: Vec::new(),
+            gpu_status,
             pcie_throughput: HashMap::new(),
             ollama_models: Vec::new(),
             active_leases: HashMap::new(),
@@ -260,6 +325,7 @@ mod tests {
             sse: SseBroadcaster::new(64),
             started_at: Instant::now(),
             llm_router: None,
+            metrics_state: None,
         })
     }
 
@@ -338,6 +404,7 @@ mod tests {
             sse: SseBroadcaster::new(64),
             started_at: Instant::now(),
             llm_router: None,
+            metrics_state: None,
         })
     }
 

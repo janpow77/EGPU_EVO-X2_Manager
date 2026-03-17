@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Severity;
-use crate::monitor::{acquire_gpu_lease, recommend_gpu_placement, release_gpu_lease};
+use crate::monitor::{GpuLease, LeaseTargetKind, acquire_gpu_lease, recommend_gpu_placement, release_gpu_lease};
 use crate::scheduler::{AdmissionState, GpuTarget};
 use crate::web::AppState;
 use crate::web::sse::BroadcastEvent;
@@ -786,6 +786,161 @@ pub async fn post_gpu_acquire(
     }
 }
 
+// ─── POST /api/gpu/acquire-multi (Multi-GPU Leases) ─────────────────────
+
+pub async fn post_gpu_acquire_multi(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<GpuAcquireBody>,
+) -> impl IntoResponse {
+    let config = state.config.load();
+
+    // Prüfe ob dieser Workload-Typ für Multi-GPU konfiguriert ist
+    let pipeline_cfg = config.pipeline.iter().find(|p| p.container == body.pipeline);
+    let is_multi_gpu = pipeline_cfg
+        .map(|p| p.multi_gpu_workloads.contains(&body.workload_type))
+        .unwrap_or(false);
+
+    if !is_multi_gpu {
+        return Json(serde_json::json!({
+            "granted": false,
+            "reason": format!(
+                "Workload '{}' ist nicht in multi_gpu_workloads für Pipeline '{}'",
+                body.workload_type, body.pipeline
+            ),
+            "leases": [],
+        }))
+        .into_response();
+    }
+
+    let mut st = state.monitor_state.lock().await;
+    let now = chrono::Utc::now();
+    let expires = now + chrono::Duration::seconds(body.duration_seconds as i64);
+
+    // Beide GPUs: Infos sammeln und VRAM proportional verteilen
+    let targets = [
+        (GpuTarget::Egpu, &config.gpu.egpu_pci_address, "egpu"),
+        (GpuTarget::Internal, &config.gpu.internal_pci_address, "internal"),
+    ];
+
+    let mut gpu_infos: Vec<(GpuTarget, String, String, Option<u32>, u64, u64)> = Vec::new();
+    let mut total_capacity: u64 = 0;
+
+    for (target, pci_addr, _label) in &targets {
+        let gpu = st.gpu_status.iter().find(|g| g.pci_address == **pci_addr);
+        let (uuid, nvidia_idx, total_mb) = gpu
+            .map(|g| (g.gpu_uuid.clone(), g.nvidia_index, g.memory_total_mb))
+            .unwrap_or_default();
+        let available = st.scheduler.vram_available(*target);
+        total_capacity += available;
+        gpu_infos.push((*target, pci_addr.to_string(), uuid, nvidia_idx, total_mb, available));
+    }
+
+    if total_capacity == 0 {
+        return Json(serde_json::json!({
+            "granted": false,
+            "reason": "Kein VRAM auf beiden GPUs verfuegbar",
+            "leases": [],
+        }))
+        .into_response();
+    }
+
+    // VRAM proportional nach verfügbarem Platz verteilen
+    let mut leases = Vec::new();
+
+    for (target, pci_addr, uuid, nvidia_idx, total_mb, available) in &gpu_infos {
+        if *available == 0 {
+            continue;
+        }
+
+        // Proportionaler Anteil: (available / total_capacity) * requested_vram
+        let vram_share = (((*available as f64) / (total_capacity as f64)) * (body.vram_mb as f64))
+            .ceil() as u64;
+        let vram_alloc = vram_share.min(*available);
+
+        if vram_alloc == 0 {
+            continue;
+        }
+
+        let lease_id = uuid::Uuid::new_v4().to_string();
+        let lease = GpuLease {
+            lease_id: lease_id.clone(),
+            pipeline: body.pipeline.clone(),
+            gpu_device: pci_addr.clone(),
+            gpu_uuid: uuid.clone(),
+            vram_mb: vram_alloc,
+            workload_type: body.workload_type.clone(),
+            acquired_at: now,
+            expires_at: expires,
+            target_kind: match target {
+                GpuTarget::Egpu => LeaseTargetKind::Egpu,
+                GpuTarget::Internal => LeaseTargetKind::Internal,
+            },
+            nvidia_index: *nvidia_idx,
+            nvidia_visible_devices: if uuid.is_empty() {
+                None
+            } else {
+                Some(uuid.clone())
+            },
+            assignment_source: "multi_gpu".to_string(),
+            remote_gpu_name: None,
+            remote_host: None,
+            remote_ollama_url: None,
+            remote_agent_url: None,
+            last_heartbeat: now,
+        };
+
+        st.scheduler.reserve_lease(lease_id.clone(), *target, vram_alloc);
+        st.active_leases.insert(lease_id, lease.clone());
+
+        leases.push(serde_json::json!({
+            "lease_id": lease.lease_id,
+            "gpu_device": lease.gpu_device,
+            "gpu_uuid": lease.gpu_uuid,
+            "nvidia_index": lease.nvidia_index,
+            "nvidia_visible_devices": lease.nvidia_visible_devices,
+            "target_kind": lease.target_kind,
+            "vram_mb": vram_alloc,
+            "total_vram_mb": total_mb,
+            "assignment_source": "multi_gpu",
+        }));
+    }
+
+    let warning_level = st.warning_machine.current_level();
+    drop(st);
+
+    // Log multi-GPU event
+    if leases.len() > 1 {
+        state
+            .db
+            .log_event(
+                "api.gpu_acquire_multi",
+                Severity::Info,
+                &format!(
+                    "Multi-GPU-Lease erteilt: {} Leases für '{}' ({})",
+                    leases.len(), body.pipeline, body.workload_type
+                ),
+                Some(serde_json::json!({
+                    "pipeline": &body.pipeline,
+                    "workload_type": &body.workload_type,
+                    "lease_count": leases.len(),
+                })),
+            )
+            .await
+            .ok();
+    }
+
+    Json(serde_json::json!({
+        "granted": !leases.is_empty(),
+        "multi_gpu": leases.len() > 1,
+        "leases": leases,
+        "warning_level": format!("{warning_level}"),
+        "total_vram_allocated_mb": leases.iter()
+            .filter_map(|l| l.get("vram_mb").and_then(|v| v.as_u64()))
+            .sum::<u64>(),
+    }))
+    .into_response()
+}
+
 // ─── POST /api/gpu/release (Gap 4) ──────────────────────────────────────
 
 pub async fn post_gpu_release(
@@ -829,6 +984,39 @@ pub async fn post_gpu_release(
             format!("Lease '{}' nicht gefunden", body.lease_id),
         )
         .into_response()
+    }
+}
+
+// ─── POST /api/gpu/heartbeat ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct HeartbeatBody {
+    pub lease_id: String,
+}
+
+pub async fn post_gpu_heartbeat(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<HeartbeatBody>,
+) -> impl IntoResponse {
+    if body.lease_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "lease_id required"})),
+        );
+    }
+
+    let mut st = state.monitor_state.lock().await;
+    if let Some(lease) = st.active_leases.get_mut(&body.lease_id) {
+        lease.last_heartbeat = Utc::now();
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ok", "lease_id": body.lease_id})),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Lease nicht gefunden"})),
+        )
     }
 }
 

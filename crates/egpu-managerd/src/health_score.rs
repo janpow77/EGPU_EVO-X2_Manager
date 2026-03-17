@@ -14,6 +14,9 @@ pub enum HealthEventKind {
     NvidiaSmiSlow,
     TemperatureSpike,
     PstateAnomaly,
+    XidError,
+    SmClockVariance,
+    PowerInstability,
 }
 
 impl std::fmt::Display for HealthEventKind {
@@ -24,6 +27,9 @@ impl std::fmt::Display for HealthEventKind {
             HealthEventKind::NvidiaSmiSlow => write!(f, "nvidia-smi langsam"),
             HealthEventKind::TemperatureSpike => write!(f, "Temperatur-Spike"),
             HealthEventKind::PstateAnomaly => write!(f, "P-State-Anomalie"),
+            HealthEventKind::XidError => write!(f, "Xid-Fehler"),
+            HealthEventKind::SmClockVariance => write!(f, "SM-Clock-Varianz"),
+            HealthEventKind::PowerInstability => write!(f, "Power-Instabilitaet"),
         }
     }
 }
@@ -96,6 +102,9 @@ impl LinkHealthScore {
             HealthEventKind::NvidiaSmiSlow => self.smi_slow_penalty,
             HealthEventKind::TemperatureSpike => self.thermal_penalty,
             HealthEventKind::PstateAnomaly => self.aer_penalty, // same as AER
+            HealthEventKind::XidError => self.pcie_error_penalty, // same as PCIe transient
+            HealthEventKind::SmClockVariance => self.smi_slow_penalty,
+            HealthEventKind::PowerInstability => self.smi_slow_penalty,
         };
 
         self.score = (self.score - penalty).clamp(0.0, 100.0);
@@ -174,6 +183,11 @@ impl LinkHealthScore {
     /// Current score value.
     pub fn current_score(&self) -> f64 {
         self.score
+    }
+
+    /// The warning threshold below which the health score is considered low.
+    pub fn warning_threshold(&self) -> f64 {
+        self.warning_threshold
     }
 
     /// JSON summary for SSE/API.

@@ -34,3 +34,5 @@ hex = "0.4"
 rand = "0.9"
 thiserror = { workspace = true }
 arc-swap = "1"
+nvml-wrapper = "0.12"
+prometheus-client = "0.22"

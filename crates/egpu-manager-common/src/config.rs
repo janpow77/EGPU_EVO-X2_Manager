@@ -194,6 +194,10 @@ pub struct GpuConfig {
     pub emergency_poll_interval_ms: u64,
     #[serde(default = "default_10")]
     pub pressure_reduction_wait_seconds: u64,
+
+    /// Maximale kombinierte GPU-Leistung in Watt (0 = deaktiviert)
+    #[serde(default)]
+    pub max_combined_power_w: f64,
 }
 
 fn default_1() -> u64 {

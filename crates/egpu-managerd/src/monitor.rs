@@ -17,7 +17,7 @@ use crate::docker::DockerComposeControl;
 use crate::health_score::{HealthEventKind, LinkHealthScore};
 use crate::kmsg::KmsgMonitor;
 use crate::link_health::LinkHealthWatcher;
-use crate::nvidia::NvidiaSmiMonitor;
+use crate::nvidia::GpuMonitorBackend;
 use crate::recovery::{RecoveryStateMachine, get_egpu_pipelines};
 use crate::scheduler::{AdmissionState, GpuCapacity, GpuTarget, ScheduleRequest, VramScheduler};
 use crate::sysfs::{SysfsAerMonitor, SysfsLinkMonitor};
@@ -60,6 +60,9 @@ pub struct GpuLease {
     pub remote_ollama_url: Option<String>,
     #[serde(default)]
     pub remote_agent_url: Option<String>,
+    /// Last heartbeat timestamp for lease liveness detection.
+    #[serde(default = "Utc::now")]
+    pub last_heartbeat: DateTime<Utc>,
 }
 
 /// A registered remote GPU node (from LAN registration via port 7843).
@@ -97,6 +100,7 @@ pub struct MonitorOrchestrator {
     state: Arc<Mutex<MonitorState>>,
     cancel: CancellationToken,
     sse: Option<SseBroadcaster>,
+    metrics: Option<Arc<crate::metrics::DaemonMetrics>>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,12 +187,18 @@ impl MonitorOrchestrator {
             state,
             cancel,
             sse: None,
+            metrics: None,
         }
     }
 
     /// Set the SSE broadcaster for real-time event delivery.
     pub fn set_sse_broadcaster(&mut self, sse: SseBroadcaster) {
         self.sse = Some(sse);
+    }
+
+    /// Set the Prometheus metrics instance.
+    pub fn set_metrics(&mut self, metrics: Arc<crate::metrics::DaemonMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     /// Get a reference to the shared monitoring state.
@@ -245,6 +255,7 @@ impl MonitorOrchestrator {
         let gpu_sse = self.sse.clone();
         let gpu_trigger_tx = trigger_tx.clone();
         let gpu_db = self.db.clone();
+        let gpu_metrics = self.metrics.clone();
         tokio::spawn(async move {
             Self::gpu_polling_loop(
                 gpu_state,
@@ -253,6 +264,7 @@ impl MonitorOrchestrator {
                 gpu_sse,
                 gpu_trigger_tx,
                 gpu_db,
+                gpu_metrics,
             )
             .await;
         });
@@ -359,6 +371,9 @@ impl MonitorOrchestrator {
                 state
                     .health_score
                     .record_event(HealthEventKind::PcieTransient);
+            }
+            WarningTrigger::XidError { .. } => {
+                state.health_score.record_event(HealthEventKind::XidError);
             }
             _ => {}
         }
@@ -481,8 +496,9 @@ impl MonitorOrchestrator {
         sse: Option<SseBroadcaster>,
         trigger_tx: mpsc::Sender<WarningTrigger>,
         db: EventDb,
+        metrics: Option<Arc<crate::metrics::DaemonMetrics>>,
     ) {
-        let gpu_monitor = NvidiaSmiMonitor::new(config.gpu.nvidia_smi_timeout_seconds);
+        let gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
         let mut consecutive_timeouts: u32 = 0;
         let mut last_telemetry_log = std::time::Instant::now();
 
@@ -493,11 +509,18 @@ impl MonitorOrchestrator {
         // FIX 24: Power-Draw-Anomalie-Erkennung
         let mut power_baseline: Option<f64> = None;
 
+        // SM Clock Variance tracking (exponential moving average)
+        let mut clock_baseline: Option<f64> = None;
+        // Power instability tracking (10s window ~ 2 samples at 5s polling)
+        let mut power_history: VecDeque<f64> = VecDeque::with_capacity(10);
+
         // Proactive monitoring state
         let mut smi_response_times: VecDeque<u128> =
             VecDeque::with_capacity(config.gpu.nvidia_smi_response_avg_window as usize);
         let mut pstate_p4_since: Option<std::time::Instant> = None;
-        let mut last_temp: Option<(u32, std::time::Instant)> = None;
+        // Thermischer Gradient: Ring-Buffer über 60s (12 Samples bei 5s Polling)
+        // um Einzel-Sprünge beim Laststart zu glätten
+        let mut temp_history: VecDeque<(u32, std::time::Instant)> = VecDeque::with_capacity(12);
 
         // Build Ollama control for auto-unloading
         let ollama_ctl = config.ollama.as_ref().and_then(|cfg| {
@@ -543,6 +566,11 @@ impl MonitorOrchestrator {
                         Ok(mut gpus) => {
                             let response_ms = query_start.elapsed().as_millis();
                             consecutive_timeouts = 0;
+
+                            // Prometheus: nvidia query duration histogram
+                            if let Some(ref m) = metrics {
+                                m.nvidia_query_duration_ms.observe(response_ms as f64);
+                            }
 
                             // Track nvidia-smi response time
                             let window = config.gpu.nvidia_smi_response_avg_window as usize;
@@ -621,32 +649,48 @@ impl MonitorOrchestrator {
                                 }
 
                                 // --- Thermal gradient detection ---
+                                // Gradient über gleitendes 60s-Fenster berechnen,
+                                // nicht zwischen zwei 5s-Samples (das erzeugt Artefakte
+                                // von 200+ °C/min bei normalem Laststart).
                                 let current_temp = egpu_status.temperature_c;
-                                if let Some((prev_temp, prev_time)) = last_temp {
-                                    let elapsed_min = prev_time.elapsed().as_secs_f64() / 60.0;
-                                    if elapsed_min > 0.01 {
-                                        let gradient = if current_temp > prev_temp {
-                                            (current_temp - prev_temp) as f64 / elapsed_min
+                                let now_instant = std::time::Instant::now();
+                                temp_history.push_back((current_temp, now_instant));
+
+                                // Alte Samples (> 60s) entfernen
+                                while temp_history.len() > 1
+                                    && temp_history.front().unwrap().1.elapsed().as_secs() > 60
+                                {
+                                    temp_history.pop_front();
+                                }
+
+                                // Gradient nur berechnen wenn >= 30s an History (6 Samples)
+                                if temp_history.len() >= 6 {
+                                    let (oldest_temp, oldest_time) = temp_history.front().unwrap();
+                                    let elapsed_min = oldest_time.elapsed().as_secs_f64() / 60.0;
+                                    if elapsed_min > 0.1 {
+                                        let gradient = if current_temp > *oldest_temp {
+                                            (current_temp - oldest_temp) as f64 / elapsed_min
                                         } else {
                                             0.0
                                         };
 
+                                        // Nur warnen wenn Temp bereits gefährlich nah am Throttle-Limit
+                                        let temp_threshold = 76u32;
                                         if gradient > config.gpu.thermal_gradient_warning_c_per_min
-                                            && egpu_status.utilization_gpu_percent > 50
+                                            && current_temp >= temp_threshold
                                         {
                                             warn!(
-                                                "Thermischer Gradient {:.1}°C/min > {:.1}°C/min (Temp: {}°C, Last: {}°C)",
+                                                "Thermischer Gradient {:.1}°C/min > {:.1}°C/min (Temp: {}°C, Fenster: {}s)",
                                                 gradient,
                                                 config.gpu.thermal_gradient_warning_c_per_min,
                                                 current_temp,
-                                                prev_temp,
+                                                oldest_time.elapsed().as_secs(),
                                             );
                                             let mut st = state.lock().await;
                                             st.health_score.record_event(HealthEventKind::TemperatureSpike);
                                         }
                                     }
                                 }
-                                last_temp = Some((current_temp, std::time::Instant::now()));
 
                                 // --- Absolute thermal thresholds ---
                                 if current_temp >= config.gpu.thermal_critical_temp_c {
@@ -659,7 +703,7 @@ impl MonitorOrchestrator {
 
                                 // FIX 24: Power-Draw-Anomalie-Erkennung
                                 let power_w = egpu_status.power_draw_w;
-                                let tdp_w = 250.0_f64; // RTX 5070 Ti TDP
+                                let tdp_w = 300.0_f64; // RTX 5070 Ti TDP (erhoeht fuer Boost-Headroom)
 
                                 // Baseline aktualisieren (gleitender Durchschnitt)
                                 power_baseline = Some(match power_baseline {
@@ -713,7 +757,7 @@ impl MonitorOrchestrator {
                                 }
                             }
 
-                            // Update scheduler compute utilization
+                            // Update scheduler compute utilization + VRAM capacities
                             {
                                 let mut st = state.lock().await;
                                 for gpu in &gpus {
@@ -723,8 +767,119 @@ impl MonitorOrchestrator {
                                         GpuTarget::Internal
                                     };
                                     st.scheduler.set_compute_utilization(target, gpu.utilization_gpu_percent);
+
+                                    // Aktualisiere Gesamt-VRAM aus nvidia-smi (statt Hardcoded-Wert)
+                                    st.scheduler.update_total_vram(target, gpu.memory_total_mb);
+
+                                    // Interne GPU: Display-Reserve dynamisch aus tatsaechlicher
+                                    // VRAM-Nutzung ableiten. GNOME/GDM/Compositor belegen VRAM
+                                    // das der Scheduler NICHT fuer Workloads verplanen darf.
+                                    // Minimum: config-Wert ODER tatsaechliche Nutzung + Safety-Headroom
+                                    if target == GpuTarget::Internal {
+                                        // Safety-Headroom: 512 MB fuer GDM-Session-Wechsel, neue Fenster etc.
+                                        const DISPLAY_SAFETY_HEADROOM_MB: u64 = 512;
+                                        let dynamic_reserve = gpu.memory_used_mb + DISPLAY_SAFETY_HEADROOM_MB;
+                                        // Verwende Maximum aus Config-Wert und dynamischem Wert
+                                        let effective_reserve = dynamic_reserve.max(config.gpu.display_vram_reserve_mb);
+                                        st.scheduler.update_display_reserve(target, effective_reserve);
+                                    }
                                 }
                                 st.gpu_status = gpus.clone();
+
+                                // Prometheus metrics update
+                                if let Some(ref m) = metrics {
+                                    for gpu in &gpus {
+                                        let label = if gpu.pci_address == config.gpu.egpu_pci_address { "egpu" } else { "internal" };
+                                        m.update_gpu(label, gpu.temperature_c, gpu.utilization_gpu_percent,
+                                            gpu.memory_used_mb, gpu.memory_total_mb, gpu.power_draw_w,
+                                            gpu.clock_graphics_mhz, gpu.clock_memory_mhz);
+                                    }
+                                    // Scheduler metrics
+                                    m.scheduler_queue_length.set(st.scheduler.queue().len() as i64);
+                                    m.active_leases_total.set(st.active_leases.len() as i64);
+                                    m.recovery_active.set(if st.recovery_active { 1 } else { 0 });
+                                    m.health_score.set(st.health_score.current_score());
+                                    let wl = match st.warning_machine.current_level() {
+                                        WarningLevel::Green => 0,
+                                        WarningLevel::Yellow => 1,
+                                        WarningLevel::Orange => 2,
+                                        WarningLevel::Red => 3,
+                                    };
+                                    m.set_warning_level(wl);
+                                }
+
+                                // Update actual VRAM for internal GPU from compute processes
+                                for gpu in &gpus {
+                                    let target = if gpu.pci_address == config.gpu.egpu_pci_address {
+                                        GpuTarget::Egpu
+                                    } else {
+                                        GpuTarget::Internal
+                                    };
+                                    if target == GpuTarget::Internal {
+                                        if let Ok(procs) = gpu_monitor.query_compute_processes(&gpu.pci_address) {
+                                            let total_compute: u64 = procs.iter().map(|p| p.used_mb).sum();
+                                            const DISPLAY_SAFETY_HEADROOM_MB: u64 = 512;
+                                            let display_vram = gpu.memory_used_mb.saturating_sub(total_compute);
+                                            let effective_reserve = (display_vram + DISPLAY_SAFETY_HEADROOM_MB).max(config.gpu.display_vram_reserve_mb);
+                                            st.scheduler.update_display_reserve(target, effective_reserve);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // SM Clock Variance + Power Instability detection
+                            if let Some(egpu) = gpus.iter().find(|g| g.pci_address == config.gpu.egpu_pci_address) {
+                                let clock = egpu.clock_graphics_mhz as f64;
+                                // Update clock baseline (exponential moving average)
+                                clock_baseline = Some(match clock_baseline {
+                                    Some(baseline) => baseline * 0.95 + clock * 0.05,
+                                    None => clock,
+                                });
+                                // Check for SM clock variance: current clock < 80% of baseline while utilization > 50%
+                                if let Some(baseline) = clock_baseline {
+                                    if clock < baseline * 0.8 && egpu.utilization_gpu_percent > 50 {
+                                        warn!(
+                                            "SM-Clock-Varianz: {} MHz < 80% von Baseline {:.0} MHz bei {}% Auslastung",
+                                            egpu.clock_graphics_mhz, baseline, egpu.utilization_gpu_percent
+                                        );
+                                        let mut st = state.lock().await;
+                                        st.health_score.record_event(HealthEventKind::SmClockVariance);
+                                    }
+                                }
+
+                                // Power instability: track 10s window variance
+                                let power = egpu.power_draw_w;
+                                if power_history.len() >= 10 {
+                                    power_history.pop_front();
+                                }
+                                power_history.push_back(power);
+                                if power_history.len() >= 3 {
+                                    let mean = power_history.iter().sum::<f64>() / power_history.len() as f64;
+                                    let variance = power_history.iter()
+                                        .map(|p| (p - mean).powi(2))
+                                        .sum::<f64>() / power_history.len() as f64;
+                                    let stddev = variance.sqrt();
+                                    // If stddev > 30% of mean and mean > 50W (i.e. not idle), flag instability
+                                    if mean > 50.0 && stddev > mean * 0.3 {
+                                        warn!(
+                                            "Power-Instabilitaet: Stddev {:.1}W bei Mean {:.1}W (>30%)",
+                                            stddev, mean
+                                        );
+                                        let mut st = state.lock().await;
+                                        st.health_score.record_event(HealthEventKind::PowerInstability);
+                                    }
+                                }
+                            }
+
+                            // Power budget check
+                            if config.gpu.max_combined_power_w > 0.0 {
+                                let combined_power: f64 = gpus.iter().map(|g| g.power_draw_w).sum();
+                                if combined_power > config.gpu.max_combined_power_w * 0.9 {
+                                    warn!(
+                                        "Kombinierte GPU-Last {:.0}W > 90% von {:.0}W Budget",
+                                        combined_power, config.gpu.max_combined_power_w
+                                    );
+                                }
                             }
 
                             // Telemetry logging (every 30s to avoid DB bloat)
@@ -981,7 +1136,7 @@ impl MonitorOrchestrator {
         tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
 
         // Step 4: Check if nvidia-smi responds quickly
-        let gpu_monitor = NvidiaSmiMonitor::new(config.gpu.nvidia_smi_timeout_seconds);
+        let gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
         let start = std::time::Instant::now();
         match gpu_monitor.query_all().await {
             Ok(_) => {
@@ -1039,23 +1194,34 @@ impl MonitorOrchestrator {
                     return;
                 }
                 _ = tokio::time::sleep(interval) => {
+                    // Heartbeat timeout: 2x the expected interval (60s default)
+                    const HEARTBEAT_TIMEOUT_SECS: i64 = 60;
                     let now = Utc::now();
                     let mut st = state.lock().await;
-                    let expired: Vec<String> = st
+                    let stale_leases: Vec<String> = st
                         .active_leases
                         .iter()
-                        .filter(|(_, lease)| lease.expires_at <= now)
+                        .filter(|(_, lease)| {
+                            let heartbeat_stale = (now - lease.last_heartbeat).num_seconds() > HEARTBEAT_TIMEOUT_SECS;
+                            let expired = lease.expires_at <= now;
+                            heartbeat_stale || expired
+                        })
                         .map(|(id, _)| id.clone())
                         .collect();
 
-                    for id in expired {
+                    for id in stale_leases {
                         if let Some(lease) = st.active_leases.remove(&id) {
                             if lease.target_kind != LeaseTargetKind::Remote {
                                 st.scheduler.release_lease(&id);
                             }
+                            let reason = if lease.expires_at <= now {
+                                "abgelaufen"
+                            } else {
+                                "Heartbeat-Timeout"
+                            };
                             info!(
-                                "Lease {} abgelaufen (Pipeline: {}, VRAM: {} MB)",
-                                id, lease.pipeline, lease.vram_mb
+                                "Lease {} {} (Pipeline: {}, VRAM: {} MB)",
+                                id, reason, lease.pipeline, lease.vram_mb
                             );
                         }
                     }
@@ -1332,6 +1498,38 @@ fn local_available_vram(st: &MonitorState, target: GpuTarget) -> u64 {
     }
 }
 
+/// Check whether the Thunderbolt link to the eGPU is healthy enough for
+/// workload placement. Returns false if the GPU is offline, sensors are
+/// unreadable (temperature == 0), or the health score is below the warning
+/// threshold.
+fn thunderbolt_link_healthy(state: &MonitorState, egpu_pci: &str) -> bool {
+    use egpu_manager_common::gpu::GpuOnlineStatus;
+
+    // If no GPU status has been polled yet, assume healthy (don't block
+    // initial operation before the first poll cycle completes).
+    if state.gpu_status.is_empty() {
+        return true;
+    }
+
+    if let Some(gpu) = state.gpu_status.iter().find(|g| g.pci_address == egpu_pci) {
+        if gpu.status != GpuOnlineStatus::Online {
+            return false;
+        }
+        if gpu.temperature_c == 0 {
+            return false; // Sensor unreadable = link problem
+        }
+    } else {
+        return false; // GPU not found in status despite other GPUs being present
+    }
+
+    // Check health score isn't critical
+    if state.health_score.current_score() < state.health_score.warning_threshold() {
+        return false;
+    }
+
+    true
+}
+
 fn remote_reserved_vram(st: &MonitorState, remote_name: &str) -> u64 {
     st.active_leases
         .values()
@@ -1436,7 +1634,8 @@ fn select_lease_placement(
         None
     };
 
-    let egpu_usable = st.scheduler.egpu_allows_priority(priority) && egpu_available >= vram_mb;
+    let tb_healthy = thunderbolt_link_healthy(st, &config.gpu.egpu_pci_address);
+    let egpu_usable = tb_healthy && st.scheduler.egpu_allows_priority(priority) && egpu_available >= vram_mb;
     let internal_usable = internal_available >= vram_mb;
 
     if warning_level >= WarningLevel::Yellow {
@@ -1661,6 +1860,7 @@ pub async fn acquire_gpu_lease(
                 remote_host: None,
                 remote_ollama_url: None,
                 remote_agent_url: None,
+                last_heartbeat: now,
             };
 
             st.scheduler
@@ -1689,6 +1889,7 @@ pub async fn acquire_gpu_lease(
                 remote_host: Some(remote.host.clone()),
                 remote_ollama_url: Some(format!("http://{}:{}", remote.host, remote.port_ollama)),
                 remote_agent_url: Some(format!("http://{}:{}", remote.host, remote.port_agent)),
+                last_heartbeat: now,
             };
 
             st.active_leases.insert(lease_id, lease.clone());

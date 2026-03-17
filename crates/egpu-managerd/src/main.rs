@@ -1,5 +1,4 @@
 mod aer;
-#[allow(dead_code)]
 mod db;
 mod docker;
 mod health_score;
@@ -8,9 +7,7 @@ mod link_health;
 mod llm;
 mod monitor;
 mod nvidia;
-#[allow(dead_code)]
 mod ollama;
-#[allow(dead_code)]
 mod recovery;
 mod remote_listener;
 mod scheduler;
@@ -18,6 +15,7 @@ mod setup_generator;
 mod sysinfo;
 mod web;
 mod sysfs;
+mod metrics;
 mod warning;
 
 use std::path::PathBuf;
@@ -70,10 +68,47 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // GPU-Status abfragen
-    let gpu_monitor = nvidia::NvidiaSmiMonitor::new(config.gpu.nvidia_smi_timeout_seconds);
+    let gpu_monitor = nvidia::GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
+
+    // Driver version check
+    match gpu_monitor.query_driver_version() {
+        Ok(version) => {
+            info!("NVIDIA-Treiber: {}", version);
+            // RTX 5000 series needs driver 550+
+            if let Ok(major) = version.split('.').next().unwrap_or("0").parse::<u32>() {
+                if major < 550 {
+                    warn!("Treiber-Version {} ist zu alt fuer RTX 5000 (empfohlen: >= 550)", version);
+                }
+            }
+        }
+        Err(e) => warn!("Treiber-Version nicht ermittelbar: {e}"),
+    }
 
     match gpu_monitor.query_all().await {
         Ok(gpus) => {
+            if gpus.is_empty() {
+                error!("Keine GPUs gefunden — Daemon kann nicht starten");
+                std::process::exit(1);
+            }
+
+            let has_internal = gpus.iter().any(|g| g.pci_address == config.gpu.internal_pci_address);
+            let has_egpu = gpus.iter().any(|g| g.pci_address == config.gpu.egpu_pci_address);
+
+            if !has_internal {
+                error!(
+                    "Interne GPU {} nicht gefunden — Daemon kann nicht starten",
+                    config.gpu.internal_pci_address
+                );
+                std::process::exit(1);
+            }
+
+            if !has_egpu {
+                warn!(
+                    "eGPU {} nicht gefunden — starte im Internal-Only-Modus",
+                    config.gpu.egpu_pci_address
+                );
+            }
+
             for gpu in &gpus {
                 let gpu_type = if gpu.pci_address == config.gpu.egpu_pci_address {
                     "eGPU"
@@ -177,24 +212,30 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Display-VRAM-Reservierung
-    match gpu_monitor
+    // Display-VRAM-Reservierung: Messen und fuer Scheduler-Init speichern
+    // Safety-Headroom (512 MB) fuer GDM-Neustart/Session-Wechsel
+    const DISPLAY_SAFETY_HEADROOM_MB: u64 = 512;
+    let measured_display_reserve_mb = match gpu_monitor
         .query_display_vram(&config.gpu.internal_pci_address)
         .await
     {
         Ok(display_vram_mb) => {
+            let effective = (display_vram_mb + DISPLAY_SAFETY_HEADROOM_MB)
+                .max(config.gpu.display_vram_reserve_mb);
             info!(
-                "Display-VRAM-Reservierung auf interner GPU: {} MB",
-                display_vram_mb
+                "Display-VRAM auf interner GPU: {} MB (Reserve: {} MB = gemessen + {} MB Headroom)",
+                display_vram_mb, effective, DISPLAY_SAFETY_HEADROOM_MB
             );
+            Some(effective)
         }
         Err(e) => {
             warn!(
                 "Display-VRAM nicht ermittelbar, verwende Fallback: {} MB — {e}",
                 config.gpu.display_vram_reserve_mb
             );
+            None
         }
-    }
+    };
 
     // Ollama-Status
     if let Some(ref ollama_config) = config.ollama
@@ -338,6 +379,19 @@ async fn main() -> anyhow::Result<()> {
     // Start monitoring orchestrator
     let mut orchestrator = MonitorOrchestrator::new(config.clone(), db.clone(), cancel.clone());
     orchestrator.set_sse_broadcaster(sse.clone());
+
+    // Gemessene Display-VRAM-Reserve in den Scheduler einspeisen
+    if let Some(reserve) = measured_display_reserve_mb {
+        let state = orchestrator.state();
+        let mut st = state.lock().await;
+        st.scheduler.update_display_reserve(scheduler::GpuTarget::Internal, reserve);
+        drop(st);
+    }
+
+    // Create Prometheus metrics
+    let (daemon_metrics, metrics_state) = metrics::create_metrics();
+    orchestrator.set_metrics(daemon_metrics);
+
     info!("Monitoring-Orchestrator wird gestartet");
 
     // Start web server in parallel with monitoring
@@ -345,9 +399,10 @@ async fn main() -> anyhow::Result<()> {
     let web_db = db.clone();
     let web_cancel = cancel.clone();
     let monitor_state = orchestrator.state();
+    let web_metrics_state = metrics_state;
 
     let web_handle = tokio::spawn(async move {
-        web::start_web_server(web_config, web_db, monitor_state.clone(), web_cancel.clone(), sse).await;
+        web::start_web_server(web_config, web_db, monitor_state.clone(), web_cancel.clone(), sse, Some(web_metrics_state)).await;
     });
 
     // Start remote listener (separate server on port 7843) in parallel

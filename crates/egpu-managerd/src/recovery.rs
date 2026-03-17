@@ -293,6 +293,9 @@ impl RecoveryStateMachine {
     ) -> anyhow::Result<StageResult> {
         info!("Stage 0: Quiesce-Hooks werden ausgeführt");
 
+        let mut success_count = 0u32;
+        let mut fail_count = 0u32;
+
         for pipeline in &config.pipeline {
             if !self.affected.pipelines.contains(&pipeline.container) {
                 continue;
@@ -310,10 +313,11 @@ impl RecoveryStateMachine {
                 match docker.exec_in_container(&hook.container, &cmd_parts, timeout).await {
                     Ok(output) => {
                         info!("Quiesce-Hook erfolgreich: {} -> {}", hook.container, output);
+                        success_count += 1;
                     }
                     Err(e) => {
-                        warn!("Quiesce-Hook fehlgeschlagen: {} -> {}", hook.container, e);
-                        // Continue with other hooks, don't fail the whole stage
+                        warn!("Quiesce-Hook {} fehlgeschlagen: {e}", hook.container);
+                        fail_count += 1;
                     }
                 }
             }
@@ -329,11 +333,27 @@ impl RecoveryStateMachine {
                     )
                     .await
                 {
-                    Ok(_) => info!("Redis BGSAVE erfolgreich: {}", redis_container),
-                    Err(e) => warn!("Redis BGSAVE fehlgeschlagen: {} -> {}", redis_container, e),
+                    Ok(_) => {
+                        info!("Redis BGSAVE erfolgreich: {}", redis_container);
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        warn!("Redis BGSAVE {} fehlgeschlagen: {e}", redis_container);
+                        fail_count += 1;
+                    }
                 }
             }
         }
+
+        // If more than half of quiesce operations failed, fail the stage
+        let total = success_count + fail_count;
+        if total > 0 && fail_count > total / 2 {
+            warn!("Quiesce fehlgeschlagen: {fail_count}/{total} Hooks fehlgeschlagen");
+            return Ok(StageResult::Failed(format!(
+                "Quiesce: {fail_count}/{total} Hooks fehlgeschlagen"
+            )));
+        }
+        info!("Quiesce abgeschlossen: {success_count}/{total} Hooks erfolgreich");
 
         Ok(StageResult::AdvanceToNext)
     }
