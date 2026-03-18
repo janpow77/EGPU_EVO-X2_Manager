@@ -42,6 +42,19 @@ body{background:var(--bg);display:flex;align-items:flex-start;justify-content:ce
 .warn-banner.orange{display:block;background:rgba(249,115,22,.15);color:var(--warm);border:1px solid rgba(249,115,22,.3)}
 .warn-banner.red{display:block;background:rgba(239,68,68,.15);color:var(--red);border:1px solid rgba(239,68,68,.3)}
 
+.disconnect-banner{text-align:center;padding:10px 16px;border-radius:8px;font-size:12px;
+  margin-bottom:12px;display:none;border:1px solid rgba(0,176,240,.3);background:rgba(0,176,240,.08);color:var(--tb)}
+.disconnect-banner.visible{display:flex;align-items:center;justify-content:center;gap:12px}
+.disconnect-banner.preparing{border-color:rgba(245,158,11,.3);background:rgba(245,158,11,.08);color:var(--amber)}
+.disconnect-banner.ready{border-color:rgba(118,185,0,.3);background:rgba(118,185,0,.08);color:var(--nv)}
+.disconnect-banner.failed{border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.08);color:var(--red)}
+.disconnect-btn{padding:4px 14px;border-radius:5px;border:1px solid var(--tb);background:transparent;
+  color:var(--tb);font-size:11px;font-weight:600;cursor:pointer;white-space:nowrap;transition:all .15s}
+.disconnect-btn:hover{background:var(--tb);color:#fff}
+.disconnect-btn:disabled{opacity:.4;cursor:not-allowed}
+.disconnect-btn.safe{border-color:var(--nv);color:var(--nv)}
+.disconnect-btn.safe:hover{background:var(--nv)}
+
 /* ── PIPELINE FLOW ──────────────────────────────────────── */
 .pipeline{display:flex;align-items:center;justify-content:center;flex-wrap:nowrap;
   overflow-x:auto;padding:8px;gap:0}
@@ -256,6 +269,10 @@ body{background:var(--bg);display:flex;align-items:flex-start;justify-content:ce
   <span id="live-uptime" class="mono" style="font-size:10px;opacity:.5"></span>
 </div>
 <div id="warn-banner" class="warn-banner"></div>
+<div id="disconnect-banner" class="disconnect-banner">
+  <span id="disconnect-msg">eGPU Safe-Disconnect</span>
+  <button id="disconnect-btn" class="disconnect-btn" onclick="safeDisconnect()">&#x26A1; Safe Disconnect</button>
+</div>
 
 <!-- ── PIPELINE FLOW ───────────────────────────────────── -->
 <div class="pipeline" id="pipeline-flow"></div>
@@ -350,7 +367,7 @@ function connectSSE(){
   sse=new EventSource(BASE+"/api/events/stream");
   sse.onopen=function(){reconnAttempt=0;setLive(true);fetchAll()};
   sse.onerror=function(){sse.close();sse=null;scheduleReconnect()};
-  ["gpu_status","warning_level","recovery_stage","pipeline_change","config_reload","audit_action"].forEach(function(t){
+  ["gpu_status","warning_level","recovery_stage","pipeline_change","config_reload","audit_action","egpu_disconnect"].forEach(function(t){
     sse.addEventListener(t,function(e){try{handleEvt(t,JSON.parse(e.data))}catch(_){}});
   });
 }
@@ -359,10 +376,11 @@ function scheduleReconnect(){
   if(!delay){setLive(false);return}
   setTimeout(connectSSE,delay);
 }
-function handleEvt(t){
+function handleEvt(t,d){
   if(t==="gpu_status"||t==="warning_level"||t==="config_reload")fetchAll();
   else if(t==="pipeline_change")fetchPipelines();
   else if(t==="recovery_stage")fetchStatus();
+  else if(t==="egpu_disconnect"&&d)updateDisconnectBanner(d.data||d);
 }
 function setLive(on){
   document.getElementById("live-dot").classList.toggle("off",!on);
@@ -421,6 +439,72 @@ function renderWarnBanner(){
   var rs=document.getElementById("recovery-status");
   if(state.daemon.recovery_active)rs.textContent="Recovery: "+(state.daemon.recovery_stage||"aktiv");
   else rs.textContent="";
+
+  // Disconnect-Banner: Zeige Safe-Disconnect-Button wenn eGPU online
+  checkDisconnectStatus();
+}
+
+// ─── eGPU Safe Disconnect ───────────────────────────────
+function checkDisconnectStatus(){
+  fetch(BASE+"/api/egpu/disconnect-status").then(function(r){return r.json()}).then(function(d){
+    var banner=document.getElementById("disconnect-banner");
+    var msg=document.getElementById("disconnect-msg");
+    var btn=document.getElementById("disconnect-btn");
+    if(!d.egpu_online){
+      banner.className="disconnect-banner";return;
+    }
+    if(d.action_required){
+      banner.className="disconnect-banner visible";
+      msg.textContent="\u26A1 "+esc(d.message);
+      btn.style.display="inline-block";btn.disabled=false;
+      btn.textContent="\u26A1 Safe Disconnect";btn.className="disconnect-btn";
+    }else{
+      banner.className="disconnect-banner visible ready";
+      msg.textContent="\u2705 "+esc(d.message);
+      btn.style.display="none";
+    }
+  }).catch(function(){});
+}
+function updateDisconnectBanner(d){
+  var banner=document.getElementById("disconnect-banner");
+  var msg=document.getElementById("disconnect-msg");
+  var btn=document.getElementById("disconnect-btn");
+  if(!d||!d.phase)return;
+  if(d.phase==="preparing"){
+    banner.className="disconnect-banner visible preparing";
+    msg.textContent="\u23F3 "+esc(d.message);
+    btn.disabled=true;btn.textContent="Wird vorbereitet...";
+  }else if(d.phase==="ready"){
+    banner.className="disconnect-banner visible ready";
+    msg.textContent="\u2705 "+esc(d.message);
+    btn.className="disconnect-btn safe";btn.disabled=false;
+    btn.textContent="\u2714 Jetzt sicher trennen";btn.style.display="inline-block";
+  }else if(d.phase==="partial"){
+    banner.className="disconnect-banner visible preparing";
+    msg.textContent="\u26A0 "+esc(d.message);
+    btn.disabled=false;btn.style.display="none";
+  }else if(d.phase==="failed"){
+    banner.className="disconnect-banner visible failed";
+    msg.textContent="\u274C "+esc(d.message);
+    btn.disabled=false;btn.textContent="\u26A1 Erneut versuchen";btn.className="disconnect-btn";
+  }
+}
+function safeDisconnect(){
+  var btn=document.getElementById("disconnect-btn");
+  btn.disabled=true;btn.textContent="Wird vorbereitet...";
+  fetch(BASE+"/api/egpu/prepare-disconnect",{method:"POST"})
+    .then(function(r){return r.json()})
+    .then(function(d){
+      updateDisconnectBanner({
+        phase:d.safe_to_unplug?"ready":d.success?"partial":"failed",
+        message:d.safe_to_unplug?"eGPU kann jetzt sicher getrennt werden."
+          :d.success?"Migration abgeschlossen, Warnungen: "+d.warnings.join(", ")
+          :"Fehler: "+d.pipelines_failed.join(", ")
+      });
+    })
+    .catch(function(e){
+      updateDisconnectBanner({phase:"failed",message:"API-Fehler: "+e.message});
+    });
 }
 
 // ─── Pipeline flow visualization ────────────────────────

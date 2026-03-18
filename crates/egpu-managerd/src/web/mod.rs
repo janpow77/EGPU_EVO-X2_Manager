@@ -157,6 +157,15 @@ fn build_router(state: Arc<AppState>) -> Router {
         // Setup generator (Windows Remote-Node)
         .route("/api/setup/generate", post(api::post_setup_generate))
         .route("/api/setup/instructions", get(api::get_setup_instructions))
+        // eGPU Safe-Disconnect
+        .route(
+            "/api/egpu/prepare-disconnect",
+            post(api::post_egpu_prepare_disconnect),
+        )
+        .route(
+            "/api/egpu/disconnect-status",
+            get(api::get_egpu_disconnect_status),
+        )
         // Prometheus Metrics
         .route("/metrics", get(metrics_handler))
         // LLM Gateway

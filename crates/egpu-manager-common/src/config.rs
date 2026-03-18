@@ -449,6 +449,14 @@ pub struct RecoveryConfig {
     pub reset_cooldown_seconds: u64,
     #[serde(default = "default_5")]
     pub scheduling_lock_timeout_seconds: u64,
+    /// Verzeichnis fuer Override-Dateien (Daemon-schreibbar).
+    /// Default: /var/lib/egpu-manager/overrides/
+    #[serde(default = "default_override_dir")]
+    pub override_dir: String,
+    /// Automatisch Display-Outputs von eGPU loesen bei Recovery/Disconnect.
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub auto_detach_display: bool,
 }
 
 impl Default for RecoveryConfig {
@@ -457,8 +465,14 @@ impl Default for RecoveryConfig {
             max_attempts: default_4(),
             reset_cooldown_seconds: default_30(),
             scheduling_lock_timeout_seconds: default_5(),
+            override_dir: default_override_dir(),
+            auto_detach_display: true,
         }
     }
+}
+
+fn default_override_dir() -> String {
+    "/var/lib/egpu-manager/overrides".to_string()
 }
 
 fn default_4() -> u32 {

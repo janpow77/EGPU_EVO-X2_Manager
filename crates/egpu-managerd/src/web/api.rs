@@ -1667,6 +1667,130 @@ pub async fn get_setup_instructions() -> impl IntoResponse {
     }))
 }
 
+// ─── eGPU Safe-Disconnect ─────────────────────────────────────────────────
+
+/// POST /api/egpu/prepare-disconnect — Sichere eGPU-Trennung vorbereiten
+/// Fuehrt Display-Detach und Pipeline-Migration durch bevor die eGPU
+/// physisch getrennt wird. Verhindert nvidia-modeset Hang und System-Freeze.
+pub async fn post_egpu_prepare_disconnect(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let cfg = state.config.load();
+
+    // SSE-Event: Disconnect-Vorbereitung gestartet
+    state.sse.send(BroadcastEvent::EgpuDisconnect(serde_json::json!({
+        "phase": "preparing",
+        "message": "eGPU Safe-Disconnect wird vorbereitet...",
+    })));
+
+    // DockerComposeControl erstellen
+    let docker = crate::docker::DockerComposeControl::new(
+        cfg.docker.api_timeout_seconds,
+        cfg.docker.container_stop_timeout_seconds,
+    );
+
+    let result = crate::recovery::prepare_safe_disconnect(&cfg, &docker).await;
+
+    // SSE-Event: Ergebnis
+    let phase = if result.safe_to_unplug {
+        "ready"
+    } else if result.success {
+        "partial"
+    } else {
+        "failed"
+    };
+    state.sse.send(BroadcastEvent::EgpuDisconnect(serde_json::json!({
+        "phase": phase,
+        "displays_detached": result.displays_detached,
+        "pipelines_migrated": result.pipelines_migrated,
+        "pipelines_failed": result.pipelines_failed,
+        "warnings": result.warnings,
+        "safe_to_unplug": result.safe_to_unplug,
+        "message": if result.safe_to_unplug {
+            "eGPU kann jetzt sicher getrennt werden."
+        } else if result.success {
+            "Migration abgeschlossen, aber Warnungen vorhanden. Trennung moeglich."
+        } else {
+            "Migration teilweise fehlgeschlagen. Vorsicht beim Trennen!"
+        },
+    })));
+
+    // DB-Event loggen
+    let severity = if result.safe_to_unplug {
+        Severity::Info
+    } else {
+        Severity::Warning
+    };
+    let _ = state.db.log_event(
+        "egpu.safe_disconnect",
+        severity,
+        &format!(
+            "Safe-Disconnect: {} Display(s) geloest, {}/{} Pipelines migriert",
+            result.displays_detached,
+            result.pipelines_migrated.len(),
+            result.pipelines_migrated.len() + result.pipelines_failed.len(),
+        ),
+        Some(serde_json::json!(&result)),
+    ).await;
+
+    Json(result)
+}
+
+/// GET /api/egpu/disconnect-status — Pruefen ob eGPU sicher getrennt werden kann
+pub async fn get_egpu_disconnect_status(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let cfg = state.config.load();
+    let monitor_state = state.monitor_state.lock().await;
+
+    // Pruefe ob eGPU ueberhaupt online ist
+    let egpu_online = monitor_state
+        .gpu_status
+        .iter()
+        .any(|g| g.pci_address == cfg.gpu.egpu_pci_address
+            && g.status == egpu_manager_common::gpu::GpuOnlineStatus::Online);
+
+    if !egpu_online {
+        return Json(serde_json::json!({
+            "egpu_online": false,
+            "safe_to_unplug": true,
+            "message": "eGPU ist nicht verbunden oder bereits offline.",
+            "action_required": false,
+        }));
+    }
+
+    // Pruefe ob Pipelines auf der eGPU laufen
+    let egpu_pipelines = crate::recovery::get_egpu_pipelines(&cfg);
+
+    // Pruefe ob Displays auf der eGPU aktiv sind
+    let has_display = monitor_state
+        .gpu_status
+        .iter()
+        .find(|g| g.pci_address == cfg.gpu.egpu_pci_address)
+        .map(|g| g.memory_used_mb > 100) // Display-VRAM > 100 MB deutet auf aktives Display
+        .unwrap_or(false);
+
+    let action_required = !egpu_pipelines.is_empty() || has_display;
+    let message = if action_required {
+        format!(
+            "WARNUNG: {} Pipeline(s) auf eGPU aktiv{}. Bitte erst 'Safe Disconnect' ausfuehren!",
+            egpu_pipelines.len(),
+            if has_display { ", Display-Output erkannt" } else { "" }
+        )
+    } else {
+        "eGPU kann sicher getrennt werden (keine aktiven Workloads).".to_string()
+    };
+
+    Json(serde_json::json!({
+        "egpu_online": true,
+        "safe_to_unplug": !action_required,
+        "pipelines_on_egpu": egpu_pipelines,
+        "has_display_output": has_display,
+        "action_required": action_required,
+        "message": message,
+    }))
+}
+
 // ─── LLM Gateway Endpoints ─────────────────────────────────────────────────
 
 /// POST /api/llm/chat/completions — OpenAI-kompatible Chat-Completion via LLM Gateway

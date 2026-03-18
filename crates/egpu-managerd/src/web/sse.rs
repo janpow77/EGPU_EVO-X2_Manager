@@ -27,6 +27,9 @@ pub enum BroadcastEvent {
     AuditAction(serde_json::Value),
     #[serde(rename = "health_score")]
     HealthScore(serde_json::Value),
+    /// eGPU Safe-Disconnect Warnung/Status fuer Widget/UI
+    #[serde(rename = "egpu_disconnect")]
+    EgpuDisconnect(serde_json::Value),
 }
 
 impl BroadcastEvent {
@@ -39,6 +42,7 @@ impl BroadcastEvent {
             BroadcastEvent::ConfigReload(_) => "config_reload",
             BroadcastEvent::AuditAction(_) => "audit_action",
             BroadcastEvent::HealthScore(_) => "health_score",
+            BroadcastEvent::EgpuDisconnect(_) => "egpu_disconnect",
         }
     }
 }
@@ -138,6 +142,10 @@ mod tests {
         assert_eq!(
             BroadcastEvent::HealthScore(serde_json::Value::Null).event_type(),
             "health_score"
+        );
+        assert_eq!(
+            BroadcastEvent::EgpuDisconnect(serde_json::Value::Null).event_type(),
+            "egpu_disconnect"
         );
     }
 }

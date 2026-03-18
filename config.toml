@@ -88,6 +88,10 @@ log_path = "/tmp/egpu-manager-test/events.log"
 [recovery]
 max_attempts = 4
 reset_cooldown_seconds = 30
+# Override-Dateien unter Daemon-schreibbarem Verzeichnis (statt im Home-Dir)
+override_dir = "/var/lib/egpu-manager/overrides"
+# Automatisch Display-Outputs von eGPU loesen bei Recovery/Disconnect
+auto_detach_display = true
 
 [daemon]
 shutdown_timeout_seconds = 15

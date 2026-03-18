@@ -7,7 +7,7 @@ use egpu_manager_common::error::DockerError;
 use egpu_manager_common::hal::{ContainerInfo, DockerControl};
 use tracing::{debug, info, warn};
 
-use crate::recovery::{generate_override_path, generate_override_yaml};
+use crate::recovery::generate_override_yaml;
 
 /// Maximum number of retry attempts for Docker commands.
 const MAX_RETRIES: u32 = 3;
@@ -111,8 +111,15 @@ impl DockerControl for DockerComposeControl {
         service: &str,
         env: HashMap<String, String>,
     ) -> Result<(), DockerError> {
+        // Override-Dir aus env (gesetzt von recovery.rs), sonst Fallback auf Compose-Dir
+        let override_dir = env
+            .get("_EGPU_OVERRIDE_DIR")
+            .cloned()
+            .unwrap_or_default();
+
         // Generate override YAML file
-        let override_path = generate_override_path(compose_file, service);
+        let override_path =
+            crate::recovery::generate_override_path_with_dir(compose_file, service, &override_dir);
 
         // Build fallback device from env
         let fallback_device = env
@@ -121,6 +128,13 @@ impl DockerControl for DockerComposeControl {
             .unwrap_or_default();
 
         let yaml_content = generate_override_yaml(service, &fallback_device);
+
+        // Override-Verzeichnis sicherstellen
+        if let Some(parent) = std::path::Path::new(&override_path).parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                warn!("Override-Verzeichnis nicht erstellbar: {e}");
+            }
+        }
 
         // Write override file
         if let Err(e) = tokio::fs::write(&override_path, &yaml_content).await {

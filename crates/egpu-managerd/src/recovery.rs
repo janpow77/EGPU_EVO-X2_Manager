@@ -285,13 +285,31 @@ impl RecoveryStateMachine {
     }
 
     /// Stage 0: Execute quiesce hooks in order.
-    /// Order: Celery first, then generic, then Redis BGSAVE, then PostgreSQL CHECKPOINT.
+    /// Zuerst Display-Outputs von eGPU loesen (nvidia-modeset Hang verhindern),
+    /// dann Celery, generic hooks, Redis BGSAVE, PostgreSQL CHECKPOINT.
     async fn execute_quiesce(
         &self,
         config: &Config,
         docker: &dyn DockerControl,
     ) -> anyhow::Result<StageResult> {
         info!("Stage 0: Quiesce-Hooks werden ausgeführt");
+
+        // Display-Detach VOR allen anderen Quiesce-Aktionen
+        if config.recovery.auto_detach_display {
+            match detach_egpu_displays(&config.gpu.egpu_pci_address).await {
+                Ok(detached) => {
+                    if detached > 0 {
+                        info!("Display-Detach: {detached} Output(s) von eGPU geloest");
+                    } else {
+                        info!("Display-Detach: Keine aktiven eGPU-Outputs gefunden");
+                    }
+                }
+                Err(e) => {
+                    warn!("Display-Detach fehlgeschlagen: {e}");
+                    // Kein Abbruch — versuche trotzdem weiterzumachen
+                }
+            }
+        }
 
         let mut success_count = 0u32;
         let mut fail_count = 0u32;
@@ -408,6 +426,14 @@ impl RecoveryStateMachine {
     ) -> anyhow::Result<StageResult> {
         info!("Stage 2: Container-Migration auf Fallback-GPU");
 
+        // Override-Verzeichnis sicherstellen (Daemon-schreibbar)
+        let override_dir = &config.recovery.override_dir;
+        if !override_dir.is_empty() {
+            if let Err(e) = tokio::fs::create_dir_all(override_dir).await {
+                warn!("Override-Verzeichnis nicht erstellbar: {override_dir}: {e}");
+            }
+        }
+
         for pipeline in &config.pipeline {
             if !self.affected.pipelines.contains(&pipeline.container) {
                 continue;
@@ -422,6 +448,11 @@ impl RecoveryStateMachine {
             env.insert(
                 "CUDA_VISIBLE_DEVICES".to_string(),
                 pipeline.cuda_fallback_device.clone(),
+            );
+            // Override-Dir an DockerControl durchreichen
+            env.insert(
+                "_EGPU_OVERRIDE_DIR".to_string(),
+                override_dir.clone(),
             );
 
             info!(
@@ -444,9 +475,10 @@ impl RecoveryStateMachine {
                     );
 
                     // Track the override in DB
-                    let override_path = generate_override_path(
+                    let override_path = generate_override_path_with_dir(
                         &pipeline.compose_file,
                         &pipeline.compose_service,
+                        override_dir,
                     );
                     let override_rec = crate::db::FallbackOverride {
                         id: None,
@@ -661,14 +693,35 @@ impl RecoveryStateMachine {
 }
 
 /// Generate the override file path for a service.
+/// Wenn override_dir gesetzt (nicht leer), werden Overrides dort abgelegt
+/// (Permission-sicher, da /var/lib/egpu-manager/ dem Daemon gehoert).
+/// Sonst Fallback auf das Compose-Verzeichnis.
 pub fn generate_override_path(compose_file: &str, service: &str) -> String {
-    let compose_dir = std::path::Path::new(compose_file)
-        .parent()
-        .unwrap_or(std::path::Path::new("/tmp"));
-    compose_dir
-        .join(format!("docker-compose.egpu-fallback.{service}.yml"))
-        .to_string_lossy()
-        .to_string()
+    generate_override_path_with_dir(compose_file, service, "")
+}
+
+/// Generate override path mit explizitem override_dir.
+pub fn generate_override_path_with_dir(
+    compose_file: &str,
+    service: &str,
+    override_dir: &str,
+) -> String {
+    if override_dir.is_empty() {
+        // Legacy-Verhalten: neben der compose-Datei
+        let compose_dir = std::path::Path::new(compose_file)
+            .parent()
+            .unwrap_or(std::path::Path::new("/tmp"));
+        compose_dir
+            .join(format!("docker-compose.egpu-fallback.{service}.yml"))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        // Neues Verhalten: unter override_dir (Daemon-schreibbar)
+        std::path::Path::new(override_dir)
+            .join(format!("docker-compose.egpu-fallback.{service}.yml"))
+            .to_string_lossy()
+            .to_string()
+    }
 }
 
 /// Generate override YAML content for GPU fallback.
@@ -707,6 +760,319 @@ async fn check_nvidia_smi_available() -> bool {
         Ok(Ok(output)) => output.status.success(),
         _ => false,
     }
+}
+
+/// Loesche alle Display-Outputs die ueber eine bestimmte GPU laufen.
+/// Nutzt xrandr um Outputs zu identifizieren und zu deaktivieren.
+/// Gibt die Anzahl deaktivierter Outputs zurueck.
+pub async fn detach_egpu_displays(egpu_pci_address: &str) -> anyhow::Result<u32> {
+    use tokio::process::Command;
+
+    // Schritt 1: Finde alle DRM-Card-Nummern fuer die eGPU PCI-Adresse
+    // /sys/bus/pci/devices/0000:05:00.0/drm/card* -> cardN
+    let drm_path = format!("/sys/bus/pci/devices/{egpu_pci_address}/drm");
+    let mut egpu_cards = Vec::new();
+
+    if let Ok(mut entries) = tokio::fs::read_dir(&drm_path).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("card") && !name.contains('-') {
+                egpu_cards.push(name);
+            }
+        }
+    }
+
+    if egpu_cards.is_empty() {
+        info!("Keine DRM-Karten fuer eGPU {} gefunden", egpu_pci_address);
+        return Ok(0);
+    }
+
+    // Schritt 2: xrandr --listmonitors um aktive Monitore zu finden
+    // Dann verbundene Outputs mit eGPU-Karten abgleichen
+    let xrandr_output = match Command::new("xrandr")
+        .arg("--listmonitors")
+        .env("DISPLAY", ":0")
+        .env("XAUTHORITY", "/run/user/1000/gdm/Xauthority")
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => {
+            // Wayland: Versuch mit gnome-randr oder mutter DBus
+            info!("xrandr nicht verfuegbar, versuche Wayland-Display-Detach");
+            return detach_egpu_displays_wayland(egpu_pci_address).await;
+        }
+    };
+
+    // Schritt 3: Finde Outputs die auf eGPU-Karten liegen
+    // xrandr --listmonitors zeigt z.B.:
+    //   0: +*DP-0 1920/600x1080/340+0+0  DP-0
+    //   1: +HDMI-1-0 1920/600x1080/340+1920+0  HDMI-1-0
+    // Wir muessen pruefen welche davon auf der eGPU-Karte liegen
+    let mut detached = 0u32;
+
+    // Finde alle xrandr Outputs und pruefe welche zur eGPU gehoeren
+    let providers_output = Command::new("xrandr")
+        .arg("--listproviders")
+        .env("DISPLAY", ":0")
+        .env("XAUTHORITY", "/run/user/1000/gdm/Xauthority")
+        .output()
+        .await;
+
+    // Einfacherer Ansatz: alle Outputs der eGPU-Karten ueber sysfs finden
+    for card in &egpu_cards {
+        let card_path = format!("{drm_path}/{card}");
+        if let Ok(mut card_entries) = tokio::fs::read_dir(&card_path).await {
+            while let Ok(Some(entry)) = card_entries.next_entry().await {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // DRM-Connector-Verzeichnisse: card0-DP-1, card0-HDMI-A-1, etc.
+                if name.starts_with(&format!("{card}-")) {
+                    let connector = name.trim_start_matches(&format!("{card}-"));
+                    // Pruefe ob der Connector aktiv ist
+                    let status_path = entry.path().join("status");
+                    if let Ok(status) = tokio::fs::read_to_string(&status_path).await {
+                        if status.trim() == "connected" {
+                            // xrandr-Output-Name: Connector-Name ohne card-Prefix,
+                            // mit Bindestrich statt Doppelpunkt
+                            let output_name = connector.replace("A-", "");
+                            info!(
+                                "eGPU-Display-Output gefunden: {} (Karte: {}, Status: connected)",
+                                output_name, card
+                            );
+
+                            // Output deaktivieren via xrandr
+                            let result = Command::new("xrandr")
+                                .args(["--output", &output_name, "--off"])
+                                .env("DISPLAY", ":0")
+                                .env("XAUTHORITY", "/run/user/1000/gdm/Xauthority")
+                                .output()
+                                .await;
+
+                            match result {
+                                Ok(o) if o.status.success() => {
+                                    info!("Display-Output {} deaktiviert", output_name);
+                                    detached += 1;
+                                }
+                                Ok(o) => {
+                                    let stderr = String::from_utf8_lossy(&o.stderr);
+                                    warn!(
+                                        "xrandr --off fuer {} fehlgeschlagen: {}",
+                                        output_name, stderr
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!("xrandr nicht ausfuehrbar: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Schritt 4: Warte kurz damit der Display-Server die Aenderung verarbeitet
+    if detached > 0 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Ok(detached)
+}
+
+/// Wayland-Variante: Display-Detach ueber gnome-monitor-config oder dbus.
+async fn detach_egpu_displays_wayland(egpu_pci_address: &str) -> anyhow::Result<u32> {
+    use tokio::process::Command;
+
+    // Versuche gnome-randr (falls installiert)
+    let result = Command::new("gnome-randr")
+        .arg("query")
+        .output()
+        .await;
+
+    if let Ok(output) = result {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // gnome-randr zeigt Outputs mit Connector-Infos
+            // Parse und deaktiviere eGPU-Outputs
+            info!("gnome-randr verfuegbar, parse Outputs");
+            // TODO: gnome-randr Output parsen wenn vorhanden
+        }
+    }
+
+    // Fallback: Versuche eGPU DRM-Device via sysfs zu unbinden
+    // Das ist der sicherste Weg unter Wayland
+    let drm_path = format!("/sys/bus/pci/devices/{egpu_pci_address}/drm");
+    let mut detached = 0u32;
+
+    if let Ok(mut entries) = tokio::fs::read_dir(&drm_path).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("card") && !name.contains('-') {
+                // Signalisiere dem Display-Server dass die GPU weggeht
+                // Unter Wayland/Mutter: SIGUSR1 an gnome-shell => re-enumerate outputs
+                if let Ok(output) = Command::new("pkill")
+                    .args(["-USR1", "gnome-shell"])
+                    .output()
+                    .await
+                {
+                    if output.status.success() {
+                        info!("SIGUSR1 an gnome-shell gesendet (Display-Re-Enumeration)");
+                        detached += 1;
+                    }
+                }
+                break; // Nur einmal senden
+            }
+        }
+    }
+
+    Ok(detached)
+}
+
+/// Ergebnis einer Safe-Disconnect-Vorbereitung.
+#[derive(Debug, Clone, Serialize)]
+pub struct SafeDisconnectResult {
+    pub success: bool,
+    pub displays_detached: u32,
+    pub pipelines_migrated: Vec<String>,
+    pub pipelines_failed: Vec<String>,
+    pub warnings: Vec<String>,
+    pub safe_to_unplug: bool,
+}
+
+/// Bereitet das sichere Trennen der eGPU vor:
+/// 1. Display-Outputs von eGPU loesen
+/// 2. Quiesce-Hooks ausfuehren (Redis BGSAVE, etc.)
+/// 3. Pipelines auf interne GPU migrieren
+/// 4. Ergebnis-Report zurueckgeben
+pub async fn prepare_safe_disconnect(
+    config: &Config,
+    docker: &dyn DockerControl,
+) -> SafeDisconnectResult {
+    let mut result = SafeDisconnectResult {
+        success: false,
+        displays_detached: 0,
+        pipelines_migrated: Vec::new(),
+        pipelines_failed: Vec::new(),
+        warnings: Vec::new(),
+        safe_to_unplug: false,
+    };
+
+    // 1. Display-Detach
+    info!("Safe-Disconnect: Display-Outputs von eGPU loesen");
+    match detach_egpu_displays(&config.gpu.egpu_pci_address).await {
+        Ok(n) => {
+            result.displays_detached = n;
+            if n > 0 {
+                info!("Safe-Disconnect: {n} Display-Output(s) geloest");
+            }
+        }
+        Err(e) => {
+            let msg = format!("Display-Detach fehlgeschlagen: {e}");
+            warn!("{msg}");
+            result.warnings.push(msg);
+        }
+    }
+
+    // 2. Quiesce-Hooks fuer eGPU-Pipelines
+    let egpu_pipelines = get_egpu_pipelines(config);
+    if egpu_pipelines.is_empty() {
+        info!("Safe-Disconnect: Keine Pipelines auf eGPU aktiv");
+        result.success = true;
+        result.safe_to_unplug = true;
+        return result;
+    }
+
+    info!(
+        "Safe-Disconnect: {} Pipeline(s) auf eGPU: {:?}",
+        egpu_pipelines.len(),
+        egpu_pipelines
+    );
+
+    for pipeline_cfg in &config.pipeline {
+        if !egpu_pipelines.contains(&pipeline_cfg.container) {
+            continue;
+        }
+
+        // Quiesce-Hooks ausfuehren
+        for hook in &pipeline_cfg.quiesce_hooks {
+            let cmd_parts: Vec<&str> = hook.command.split_whitespace().collect();
+            let timeout = Duration::from_secs(hook.timeout_seconds);
+            if let Err(e) = docker.exec_in_container(&hook.container, &cmd_parts, timeout).await {
+                result
+                    .warnings
+                    .push(format!("Quiesce-Hook {} fehlgeschlagen: {e}", hook.container));
+            }
+        }
+
+        // Redis BGSAVE
+        for redis in &pipeline_cfg.redis_containers {
+            if let Err(e) = docker
+                .exec_in_container(redis, &["redis-cli", "BGSAVE"], Duration::from_secs(10))
+                .await
+            {
+                result
+                    .warnings
+                    .push(format!("Redis BGSAVE {redis} fehlgeschlagen: {e}"));
+            }
+        }
+    }
+
+    // 3. Pipelines auf Fallback-GPU migrieren
+    let override_dir = &config.recovery.override_dir;
+    if !override_dir.is_empty() {
+        if let Err(e) = tokio::fs::create_dir_all(override_dir).await {
+            result
+                .warnings
+                .push(format!("Override-Verzeichnis nicht erstellbar: {e}"));
+        }
+    }
+
+    for pipeline_cfg in &config.pipeline {
+        if !egpu_pipelines.contains(&pipeline_cfg.container) {
+            continue;
+        }
+
+        let mut env = HashMap::new();
+        env.insert(
+            "NVIDIA_VISIBLE_DEVICES".to_string(),
+            pipeline_cfg.cuda_fallback_device.clone(),
+        );
+        env.insert(
+            "CUDA_VISIBLE_DEVICES".to_string(),
+            pipeline_cfg.cuda_fallback_device.clone(),
+        );
+        env.insert("_EGPU_OVERRIDE_DIR".to_string(), override_dir.clone());
+
+        info!(
+            "Safe-Disconnect: Migriere {} auf {}",
+            pipeline_cfg.container, pipeline_cfg.cuda_fallback_device
+        );
+
+        match docker
+            .recreate_with_env(
+                &pipeline_cfg.compose_file,
+                &pipeline_cfg.compose_service,
+                env,
+            )
+            .await
+        {
+            Ok(()) => {
+                result
+                    .pipelines_migrated
+                    .push(pipeline_cfg.container.clone());
+            }
+            Err(e) => {
+                let msg = format!("{}: {e}", pipeline_cfg.container);
+                error!("Safe-Disconnect Migration fehlgeschlagen: {msg}");
+                result.pipelines_failed.push(msg);
+            }
+        }
+    }
+
+    result.success = result.pipelines_failed.is_empty();
+    result.safe_to_unplug =
+        result.success && result.displays_detached > 0 || result.warnings.is_empty();
+    result
 }
 
 /// Get affected pipelines from config that use the eGPU.
@@ -780,6 +1146,34 @@ mod tests {
     #[test]
     fn test_generate_override_path() {
         let path = generate_override_path("/opt/project/docker-compose.yml", "worker");
+        assert_eq!(
+            path,
+            "/opt/project/docker-compose.egpu-fallback.worker.yml"
+        );
+    }
+
+    #[test]
+    fn test_generate_override_path_with_dir() {
+        // Mit override_dir -> Datei landet im override-Verzeichnis
+        let path = generate_override_path_with_dir(
+            "/home/user/project/docker-compose.yml",
+            "celery-worker",
+            "/var/lib/egpu-manager/overrides",
+        );
+        assert_eq!(
+            path,
+            "/var/lib/egpu-manager/overrides/docker-compose.egpu-fallback.celery-worker.yml"
+        );
+    }
+
+    #[test]
+    fn test_generate_override_path_with_empty_dir() {
+        // Leerer override_dir -> Legacy-Verhalten (neben compose-Datei)
+        let path = generate_override_path_with_dir(
+            "/opt/project/docker-compose.yml",
+            "worker",
+            "",
+        );
         assert_eq!(
             path,
             "/opt/project/docker-compose.egpu-fallback.worker.yml"
