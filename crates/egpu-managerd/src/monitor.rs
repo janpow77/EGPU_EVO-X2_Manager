@@ -1135,7 +1135,7 @@ impl MonitorOrchestrator {
         info!("Druckreduktion: Warte {}s", wait_secs);
         tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
 
-        // Step 4: Check if nvidia-smi responds quickly
+        // Step 4: Check if GPU responds quickly (NVML or nvidia-smi fallback)
         let gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
         let start = std::time::Instant::now();
         match gpu_monitor.query_all().await {
@@ -1145,7 +1145,7 @@ impl MonitorOrchestrator {
 
                 if response_ms < threshold {
                     info!(
-                        "Druckreduktion erfolgreich: nvidia-smi antwortet in {}ms (< {}ms)",
+                        "Druckreduktion erfolgreich: GPU antwortet in {}ms (< {}ms)",
                         response_ms, threshold
                     );
 
