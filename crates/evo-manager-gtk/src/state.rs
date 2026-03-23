@@ -59,7 +59,7 @@ impl WidgetState {
     }
 }
 
-// ─── API response types (from evo-metrics-server) ──────────────
+// ─── API response types (from evo-x2-services metrics) ──────────────
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EvoMetrics {
