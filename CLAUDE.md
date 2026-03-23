@@ -1,8 +1,13 @@
-# CLAUDE.md — egpu-manager
+# CLAUDE.md — EGPU_EVO-X2_Manager
 
 ## Projektbeschreibung
 
-**egpu-manager** ist ein systemd-fähiger Daemon zur Verwaltung von zwei NVIDIA-GPUs (interne RTX 5060 Ti + externe eGPU RTX 5070 Ti über Thunderbolt). Der Daemon übernimmt:
+**EGPU_EVO-X2_Manager** ist ein Rust-Workspace mit zwei Schwerpunkten:
+
+1. **eGPU-Manager** — systemd-Daemon zur Verwaltung von NVIDIA-GPUs (NUC-seitig)
+2. **EVO-X2-Manager** — Monitoring und Server-Dienste fuer die GMKtec EVO-X2 (AMD Strix Halo LLM-Server)
+
+Der **eGPU-Manager-Daemon** verwaltet zwei NVIDIA-GPUs (interne RTX 5060 Ti + externe eGPU RTX 5070 Ti über Thunderbolt). Der Daemon übernimmt:
 
 - GPU-Monitoring (nvidia-smi, sysfs, /dev/kmsg)
 - Automatisches Failover und 5-stufige Recovery-State-Machine
@@ -17,7 +22,7 @@
 
 ```
 egpu/
-├── Cargo.toml                    # Workspace-Definition (5 Crates)
+├── Cargo.toml                    # Workspace-Definition (7 Crates)
 ├── config.toml                   # Daemon-Konfiguration (Schema v1)
 ├── pipeline-profiles.toml        # GPU-Pipeline-Analyseergebnisse
 ├── egpu-manager-spezifikation.md # Spezifikation v2.4 (kanonische Referenz)
@@ -67,13 +72,28 @@ egpu/
 │   │   └── src/lib.rs            # detect() → DetectionResult
 │   ├── egpu-manager-cli/         # CLI-Tool
 │   │   └── src/main.rs           # status, priority, config, remote, wizard, open
-│   └── egpu-manager-gtk/         # GTK4 Desktop-Widget + Tray-Icon
+│   ├── egpu-manager-gtk/         # GTK3 Desktop-Widget + Tray-Icon (NUC, eGPU)
+│   │   └── src/
+│   │       ├── main.rs           # GTK3 Main-Loop, Tray-Setup
+│   │       ├── popup.rs          # 3-Tab Popup (GPU, Pipelines, LLM)
+│   │       ├── tray.rs           # libappindicator Tray-Icon
+│   │       ├── state.rs          # WidgetState
+│   │       └── api_client.rs     # HTTP-Polling vom Daemon
+│   ├── evo-manager-gtk/          # GTK3 Desktop-Widget + Tray-Icon (NUC, EVO-X2)
+│   │   └── src/
+│   │       ├── main.rs           # GTK3 Main-Loop, Tray-Setup
+│   │       ├── popup.rs          # 4-Tab Popup (Services, Ressourcen, Setup, Config)
+│   │       ├── tray.rs           # libappindicator Tray-Icon (gruen/gelb/rot/grau)
+│   │       ├── state.rs          # EvoMetrics (GTT, RAM, CPU, Services)
+│   │       ├── config.rs         # JSON-Config (~/.config/evo-manager/)
+│   │       └── api_client.rs     # HTTP-Polling vom EVO-X2 Metrics-Server
+│   └── evo-x2-services/          # EVO-X2 Server-Dienste (laeuft AUF der EVO-X2)
+│       ├── deploy.sh             # Build + SCP + Restart auf EVO-X2
 │       └── src/
-│           ├── main.rs           # GTK4 Main-Loop, Tray-Setup
-│           ├── popup.rs          # 3-Tab Popup (GPU, Pipelines, LLM)
-│           ├── tray.rs           # libappindicator Tray-Icon
-│           ├── state.rs          # WidgetState
-│           └── api_client.rs     # HTTP-Polling vom Daemon
+│           ├── main.rs           # clap Subcommands: metrics, webhook, ocr
+│           ├── metrics.rs        # Port 8084: GTT, RAM, CPU, Service-Status (axum)
+│           ├── webhook.rs        # Port 9000: GitHub HMAC-SHA256 Webhook
+│           └── ocr.rs            # Port 8083: Docling OCR-Wrapper
 ├── clients/
 │   ├── python/                   # Python-Client (egpu-llm-client)
 │   ├── react/                    # React-Widget (EgpuPipelineWidget.tsx)
@@ -203,9 +223,9 @@ Dies deutet darauf hin, dass einige Features implementiert aber noch nicht volls
 - `rusqlite` kompiliert mit `bundled` Feature — bringt eigenes libsqlite3 mit
 - Kein System-SQLite nötig, aber erhöht Build-Zeit
 
-### GTK4 Build-Dependencies
-- `egpu-manager-gtk` benötigt GTK4-Entwicklungspakete (`libgtk-4-dev`)
-- `libappindicator` für Tray-Icon (Wayland/GNOME-kompatibel)
+### GTK3 Build-Dependencies
+- `egpu-manager-gtk` und `evo-manager-gtk` benoetigen `libgtk-3-dev` und `libappindicator3-dev`
+- Tray-Icon via libappindicator (Wayland/GNOME-kompatibel)
 
 ## Umgebungsvariablen
 
@@ -231,3 +251,47 @@ egpu-manager-cli status
 # oder
 curl http://127.0.0.1:7842/api/status
 ```
+
+## EVO-X2 Crates
+
+### evo-manager-gtk (NUC-seitig)
+
+GTK3 Tray-Widget zur Ueberwachung der GMKtec EVO-X2. Pollt den
+`evo-x2-services metrics`-Endpoint alle 5 Sekunden ueber LAN.
+
+```bash
+# Installieren auf dem NUC
+cd crates/evo-manager-gtk && bash install.sh
+
+# Manuell starten
+evo-manager-widget
+
+# Config
+~/.config/evo-manager/config.json
+```
+
+**Tabs:** Services | Ressourcen | Setup (USB-Paket) | Config (IP, SSH, GitHub)
+**Tray-Icon:** Gruen (alle aktiv), Gelb (teilweise), Rot (offline), Grau (nicht verbunden)
+
+### evo-x2-services (EVO-X2-seitig)
+
+Ein Binary mit 3 Server-Diensten die auf der EVO-X2 laufen:
+
+```bash
+evo-x2-services metrics   # Port 8084 — GTT, RAM, CPU, Service-Status
+evo-x2-services webhook   # Port 9000 — GitHub HMAC-SHA256 Webhook
+evo-x2-services ocr       # Port 8083 — Docling OCR-Wrapper
+```
+
+```bash
+# Bauen und auf EVO-X2 deployen
+cd crates/evo-x2-services && bash deploy.sh
+
+# Oder manuell
+cargo build --release -p evo-x2-services
+scp target/release/evo-x2-services jan@EVO-X2:~/.local/bin/
+```
+
+**Zusammenspiel:** Das Setup und die Bash-Scripts (llama-serve-*, llama-update.sh)
+liegen im separaten Repo `evo-x2-setup` (github.com/janpow77/evo-x2-setup).
+Die systemd-Units dort rufen `evo-x2-services` als Binary auf.
