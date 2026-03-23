@@ -6,3 +6,5 @@
 /generated/*.log
 __pycache__/
 .claude/
+/etc/
+install-stable-link.sh
