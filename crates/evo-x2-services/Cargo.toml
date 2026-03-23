@@ -1,0 +1,24 @@
+[package]
+name = "evo-x2-services"
+version.workspace = true
+edition.workspace = true
+description = "EVO-X2 Server-Dienste: Metrics, Webhook-Receiver, OCR"
+
+[[bin]]
+name = "evo-x2-services"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+clap = { workspace = true }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+subtle = "2"
