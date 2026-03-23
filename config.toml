@@ -66,6 +66,8 @@ socket = "/var/run/docker.sock"
 [local_api]
 cors_origins = ["http://localhost:3002"]
 
+# Legacy-Ollama-Config (Backward-Compat, wird von resolve_ollama_instances() genutzt
+# wenn keine [[ollama_instance]] definiert sind)
 [ollama]
 enabled = true
 host = "http://localhost:11434"
@@ -81,6 +83,57 @@ auto_unload_idle_minutes = 10
 egpu_available = "qwen3:14b"
 internal_only = "qwen3:8b"
 cpu_only = "qwen3:1.7b"
+
+# --- Multi-Instanz Ollama (Fleet-Modus) ---
+# Zwei Ollama-Prozesse: einer pro GPU, jeweils eigene Modelle und Workloads
+
+[[ollama_instance]]
+name = "ollama-egpu"
+host = "http://localhost:11434"
+gpu_device = "0000:05:00.0"
+models = ["qwen3:14b", "nomic-embed-text"]
+workload_types = ["llm", "embeddings"]
+priority = 1
+max_vram_mb = 14000
+auto_unload_idle_minutes = 10
+thermal_unload_temp_c = 75
+
+[[ollama_instance]]
+name = "ollama-internal"
+host = "http://localhost:11435"
+gpu_device = "0000:02:00.0"
+models = ["qwen3:8b"]
+workload_types = ["staging", "ocr-assist"]
+priority = 2
+max_vram_mb = 6000
+auto_unload_idle_minutes = 5
+thermal_unload_temp_c = 80
+
+# --- Workload-Typ-Definitionen ---
+
+[[workload_type]]
+name = "ocr"
+preferred_gpu = "egpu"
+cuda_required = true
+typical_vram_mb = 1500
+
+[[workload_type]]
+name = "embeddings"
+preferred_gpu = "egpu"
+typical_vram_mb = 2000
+remote_capable = true
+
+[[workload_type]]
+name = "llm"
+preferred_gpu = "egpu"
+latency_sensitive = true
+typical_vram_mb = 10000
+
+[[workload_type]]
+name = "staging"
+preferred_gpu = "internal"
+latency_sensitive = true
+typical_vram_mb = 4000
 
 [notifications]
 log_path = "/tmp/egpu-manager-test/events.log"
@@ -174,16 +227,59 @@ token_path = "/etc/egpu-manager/remote-token.secret"
 
 [llm_gateway]
 enabled = true
-default_provider = "ollama"
+default_provider = "ollama-egpu"
+
+# --- LLM Provider ---
 
 [[llm_gateway.providers]]
-name = "ollama"
+name = "ollama-egpu"
 provider_type = "openai_compatible"
 base_url = "http://localhost:11434"
 api_key_ref = ""
-models = ["qwen3:14b", "qwen3:8b", "qwen3:1.7b"]
+models = ["qwen3:14b", "nomic-embed-text"]
 enabled = true
 priority = 1
+
+[[llm_gateway.providers]]
+name = "ollama-internal"
+provider_type = "openai_compatible"
+base_url = "http://localhost:11435"
+api_key_ref = ""
+models = ["qwen3:8b"]
+enabled = true
+priority = 2
+
+# --- App-Routing: Jede App bekommt eigene GPU/Modell-Präferenzen ---
+
+[[llm_gateway.app_routing]]
+app_id = "audit_designer"
+preferred_provider = "ollama-egpu"
+allowed_providers = ["ollama-egpu", "ollama-internal"]
+workload_model_map = { embeddings = "nomic-embed-text", llm = "qwen3:14b" }
+
+[[llm_gateway.app_routing]]
+app_id = "flowinvoice"
+preferred_provider = "ollama-egpu"
+allowed_providers = ["ollama-egpu", "ollama-internal"]
+workload_model_map = { llm = "qwen3:14b", ocr = "qwen3:14b" }
+
+[[llm_gateway.app_routing]]
+app_id = "flowstat"
+preferred_provider = "ollama-egpu"
+allowed_providers = ["ollama-egpu", "ollama-internal"]
+workload_model_map = { llm = "qwen3:14b" }
+
+[[llm_gateway.app_routing]]
+app_id = "riskanalysis"
+preferred_provider = "ollama-egpu"
+allowed_providers = ["ollama-egpu", "ollama-internal"]
+workload_model_map = { embeddings = "nomic-embed-text", llm = "qwen3:14b" }
+
+[[llm_gateway.app_routing]]
+app_id = "love-ai"
+preferred_provider = "ollama-egpu"
+allowed_providers = ["ollama-egpu", "ollama-internal"]
+workload_model_map = { llm = "qwen3:14b", embeddings = "nomic-embed-text" }
 
 [[remote_gpu]]
 name = "remote-desktop"

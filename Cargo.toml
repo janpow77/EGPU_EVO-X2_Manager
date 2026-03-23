@@ -6,6 +6,7 @@ members = [
     "crates/egpu-manager-detector",
     "crates/egpu-manager-common",
     "crates/egpu-manager-gtk",
+    "crates/evo-manager-gtk",
 ]
 
 [workspace.package]

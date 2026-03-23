@@ -1,0 +1,25 @@
+[package]
+name = "evo-manager-gtk"
+version.workspace = true
+edition.workspace = true
+description = "GTK4 Tray Widget fuer GMKtec EVO-X2 LLM Server Management"
+
+[[bin]]
+name = "evo-manager-widget"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+gtk = "0.18"
+glib = "0.18"
+gio = "0.18"
+libappindicator = "0.9"
+open = "5"
+async-channel = "2"
+dirs = "5"
