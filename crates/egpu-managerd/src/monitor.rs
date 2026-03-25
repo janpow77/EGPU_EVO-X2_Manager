@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use egpu_manager_common::config::{Config, PipelineConfig, RemoteGpuConfig};
-use egpu_manager_common::gpu::{GpuStatus, GpuType, OllamaModel, PcieThroughput, WarningLevel};
+use egpu_manager_common::gpu::{GpuOnlineStatus, GpuStatus, GpuType, OllamaModel, PcieThroughput, WarningLevel};
 use egpu_manager_common::hal::{AerMonitor, OllamaControl, PcieLinkMonitor};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
@@ -195,7 +195,22 @@ impl MonitorOrchestrator {
             ollama_models_by_instance: HashMap::new(),
             active_leases: HashMap::new(),
             recovery_active: false,
-            remote_gpus: Vec::new(),
+            remote_gpus: config
+                .remote_gpu
+                .iter()
+                .filter(|r| r.availability == "always")
+                .map(|r| RegisteredRemoteGpu {
+                    name: r.name.clone(),
+                    host: r.host.clone(),
+                    port_ollama: r.port_ollama,
+                    port_agent: r.port_egpu_agent,
+                    gpu_name: r.gpu_name.clone(),
+                    vram_mb: r.vram_mb,
+                    status: "pending".to_string(),
+                    last_heartbeat: Utc::now(),
+                    latency_ms: None,
+                })
+                .collect(),
         }));
 
         Self {
@@ -531,7 +546,7 @@ impl MonitorOrchestrator {
         db: EventDb,
         metrics: Option<Arc<crate::metrics::DaemonMetrics>>,
     ) {
-        let gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
+        let mut gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
         let mut consecutive_timeouts: u32 = 0;
         let mut last_telemetry_log = std::time::Instant::now();
 
@@ -891,7 +906,33 @@ impl MonitorOrchestrator {
                                 }
 
                                 // M5: Update eGPU availability in scheduler
+                                let was_egpu_available = st.scheduler.egpu_available();
                                 st.scheduler.set_egpu_available(egpu_visible);
+
+                                // eGPU verschwunden: VRAM auf 0 setzen und verwaiste
+                                // Leases aufräumen (sonst blockiert stale VRAM-Accounting)
+                                if !egpu_visible && was_egpu_available {
+                                    st.scheduler.update_total_vram(GpuTarget::Egpu, 0);
+                                    st.scheduler.set_compute_utilization(GpuTarget::Egpu, 0);
+                                    // Verwaiste eGPU-Leases aufräumen
+                                    let orphaned: Vec<String> = st
+                                        .active_leases
+                                        .iter()
+                                        .filter(|(_, l)| l.target_kind == LeaseTargetKind::Egpu)
+                                        .map(|(id, _)| id.clone())
+                                        .collect();
+                                    for lease_id in &orphaned {
+                                        st.scheduler.release_lease(lease_id);
+                                        st.active_leases.remove(lease_id);
+                                    }
+                                    if !orphaned.is_empty() {
+                                        warn!(
+                                            "{} verwaiste eGPU-Lease(s) aufgeräumt: {:?}",
+                                            orphaned.len(),
+                                            orphaned
+                                        );
+                                    }
+                                }
 
                                 // Update scheduler compute utilization + VRAM capacities
                                 for gpu in &gpus {
@@ -916,7 +957,38 @@ impl MonitorOrchestrator {
                                     st.scheduler.update_display_reserve(*target, *reserve);
                                 }
 
-                                st.gpu_status = gpus.clone();
+                                // Fix #8: Wenn eGPU offline ist, trotzdem als "offline"
+                                // im gpu_status anzeigen statt komplett auszulassen.
+                                let mut full_gpu_status = gpus.clone();
+                                if !egpu_visible {
+                                    // Prüfen ob die eGPU bereits in der Liste ist
+                                    let egpu_in_list = full_gpu_status
+                                        .iter()
+                                        .any(|g| g.pci_address == config.gpu.egpu_pci_address);
+                                    if !egpu_in_list {
+                                        full_gpu_status.push(GpuStatus {
+                                            pci_address: config.gpu.egpu_pci_address.clone(),
+                                            nvidia_index: None,
+                                            gpu_uuid: String::new(),
+                                            name: "eGPU (offline)".to_string(),
+                                            gpu_type: GpuType::Egpu,
+                                            temperature_c: 0,
+                                            utilization_gpu_percent: 0,
+                                            memory_used_mb: 0,
+                                            memory_free_mb: 0,
+                                            memory_total_mb: 0,
+                                            power_draw_w: 0.0,
+                                            pstate: String::new(),
+                                            fan_speed_percent: 0,
+                                            clock_graphics_mhz: 0,
+                                            clock_memory_mhz: 0,
+                                            throttle_reason: String::new(),
+                                            status: GpuOnlineStatus::Offline,
+                                            numa_node: None,
+                                        });
+                                    }
+                                }
+                                st.gpu_status = full_gpu_status;
 
                                 // Prometheus metrics update
                                 if let Some(ref m) = metrics {
@@ -1280,7 +1352,7 @@ impl MonitorOrchestrator {
         tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
 
         // Step 4: Check if GPU responds quickly (NVML or nvidia-smi fallback)
-        let gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
+        let mut gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
         let start = std::time::Instant::now();
         match gpu_monitor.query_all().await {
             Ok(_) => {
@@ -1733,6 +1805,11 @@ fn find_best_remote_candidate(
         .remote_gpus
         .iter()
         .filter(|gpu| gpu.status == "online")
+        .filter(|gpu| {
+            remote_gpu_config(config, &gpu.name)
+                .map(|r| r.auto_assign)
+                .unwrap_or(true) // Dynamisch registrierte GPUs ohne Config-Eintrag: erlaubt
+        })
         .filter_map(|gpu| {
             let cfg = remote_gpu_config(config, &gpu.name);
             let total_vram = if gpu.vram_mb > 0 {

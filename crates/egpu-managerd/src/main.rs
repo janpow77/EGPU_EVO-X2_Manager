@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // GPU-Status abfragen
-    let gpu_monitor = nvidia::GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
+    let mut gpu_monitor = nvidia::GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
 
     // Driver version check
     match gpu_monitor.query_driver_version() {
@@ -89,67 +89,124 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => warn!("Treiber-Version nicht ermittelbar: {e}"),
     }
 
-    match gpu_monitor.query_all().await {
-        Ok(gpus) => {
-            if gpus.is_empty() {
-                error!("Keine GPUs gefunden — Daemon kann nicht starten");
-                std::process::exit(1);
-            }
+    // eGPU-Erkennung mit Retry: Thunderbolt-Geräte brauchen nach Boot/Hot-Plug
+    // manchmal einige Sekunden bis NVML sie sieht.
+    const EGPU_RETRY_ATTEMPTS: u32 = 5;
+    const EGPU_RETRY_BASE_DELAY_SECS: u64 = 2;
 
-            let has_internal = gpus.iter().any(|g| g.pci_address == config.gpu.internal_pci_address);
-            let has_egpu = gpus.iter().any(|g| g.pci_address == config.gpu.egpu_pci_address);
+    let mut startup_gpus = Vec::new();
+    let mut has_egpu = false;
 
-            if !has_internal {
-                error!(
-                    "Interne GPU {} nicht gefunden — Daemon kann nicht starten",
-                    config.gpu.internal_pci_address
-                );
-                std::process::exit(1);
-            }
-
-            if !has_egpu {
-                warn!(
-                    "eGPU {} nicht gefunden — starte im Internal-Only-Modus",
-                    config.gpu.egpu_pci_address
-                );
-            }
-
-            for gpu in &gpus {
-                let gpu_type = if gpu.pci_address == config.gpu.egpu_pci_address {
-                    "eGPU"
-                } else if gpu.pci_address == config.gpu.internal_pci_address {
-                    "intern"
-                } else {
-                    "unbekannt"
-                };
-
-                info!(
-                    "GPU [{}] {} ({}): {}°C, GPU {}%, VRAM {}/{} MB, {:.1}W, {}",
-                    gpu_type,
-                    gpu.name,
-                    gpu.pci_address,
-                    gpu.temperature_c,
-                    gpu.utilization_gpu_percent,
-                    gpu.memory_used_mb,
-                    gpu.memory_total_mb,
-                    gpu.power_draw_w,
-                    gpu.pstate,
-                );
-            }
-
-            // PCI-Bus-ID -> Index Mapping
-            for gpu in &gpus {
-                if let Some(idx) = gpu.nvidia_index {
-                    info!(
-                        "GPU-Mapping: {} -> nvidia-index {}",
-                        gpu.pci_address, idx
-                    );
+    for attempt in 1..=EGPU_RETRY_ATTEMPTS {
+        match gpu_monitor.query_all().await {
+            Ok(gpus) => {
+                if gpus.is_empty() {
+                    if attempt == EGPU_RETRY_ATTEMPTS {
+                        error!("Keine GPUs gefunden — Daemon kann nicht starten");
+                        std::process::exit(1);
+                    }
+                    warn!("Keine GPUs gefunden (Versuch {attempt}/{EGPU_RETRY_ATTEMPTS}), warte...");
+                    tokio::time::sleep(std::time::Duration::from_secs(
+                        EGPU_RETRY_BASE_DELAY_SECS * attempt as u64,
+                    ))
+                    .await;
+                    continue;
                 }
+
+                let has_internal =
+                    gpus.iter().any(|g| g.pci_address == config.gpu.internal_pci_address);
+                has_egpu =
+                    gpus.iter().any(|g| g.pci_address == config.gpu.egpu_pci_address);
+
+                if !has_internal {
+                    if attempt == EGPU_RETRY_ATTEMPTS {
+                        error!(
+                            "Interne GPU {} nicht gefunden — Daemon kann nicht starten",
+                            config.gpu.internal_pci_address
+                        );
+                        std::process::exit(1);
+                    }
+                    warn!(
+                        "Interne GPU nicht gefunden (Versuch {attempt}/{EGPU_RETRY_ATTEMPTS}), warte..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(
+                        EGPU_RETRY_BASE_DELAY_SECS * attempt as u64,
+                    ))
+                    .await;
+                    continue;
+                }
+
+                if !has_egpu && attempt < EGPU_RETRY_ATTEMPTS {
+                    info!(
+                        "eGPU {} noch nicht sichtbar (Versuch {attempt}/{EGPU_RETRY_ATTEMPTS}), \
+                         warte {}s auf Thunderbolt-Initialisierung...",
+                        config.gpu.egpu_pci_address,
+                        EGPU_RETRY_BASE_DELAY_SECS * attempt as u64,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(
+                        EGPU_RETRY_BASE_DELAY_SECS * attempt as u64,
+                    ))
+                    .await;
+                    continue;
+                }
+
+                startup_gpus = gpus;
+                break;
+            }
+            Err(e) => {
+                if attempt == EGPU_RETRY_ATTEMPTS {
+                    error!("GPU-Abfrage fehlgeschlagen: {e}");
+                    warn!("Daemon startet im Degraded Mode");
+                    break;
+                }
+                warn!(
+                    "GPU-Abfrage fehlgeschlagen (Versuch {attempt}/{EGPU_RETRY_ATTEMPTS}): {e}, warte..."
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    EGPU_RETRY_BASE_DELAY_SECS * attempt as u64,
+                ))
+                .await;
             }
         }
-        Err(e) => {
-            error!("GPU-Abfrage fehlgeschlagen: {e}");
-            warn!("Daemon startet im Degraded Mode");
+    }
+
+    if !has_egpu && !startup_gpus.is_empty() {
+        warn!(
+            "eGPU {} nicht gefunden nach {EGPU_RETRY_ATTEMPTS} Versuchen — starte im Internal-Only-Modus",
+            config.gpu.egpu_pci_address
+        );
+    }
+
+    for gpu in &startup_gpus {
+        let gpu_type = if gpu.pci_address == config.gpu.egpu_pci_address {
+            "eGPU"
+        } else if gpu.pci_address == config.gpu.internal_pci_address {
+            "intern"
+        } else {
+            "unbekannt"
+        };
+
+        info!(
+            "GPU [{}] {} ({}): {}°C, GPU {}%, VRAM {}/{} MB, {:.1}W, {}",
+            gpu_type,
+            gpu.name,
+            gpu.pci_address,
+            gpu.temperature_c,
+            gpu.utilization_gpu_percent,
+            gpu.memory_used_mb,
+            gpu.memory_total_mb,
+            gpu.power_draw_w,
+            gpu.pstate,
+        );
+    }
+
+    // PCI-Bus-ID -> Index Mapping
+    for gpu in &startup_gpus {
+        if let Some(idx) = gpu.nvidia_index {
+            info!(
+                "GPU-Mapping: {} -> nvidia-index {}",
+                gpu.pci_address, idx
+            );
         }
     }
 

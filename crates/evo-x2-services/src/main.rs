@@ -1,3 +1,4 @@
+mod agent;
 mod metrics;
 mod ocr;
 mod webhook;
@@ -35,6 +36,27 @@ enum Commands {
         #[arg(short, long, default_value_t = 8083)]
         port: u16,
     },
+    /// eGPU-Agent: Registriert EVO-X2 beim NUC-Daemon und sendet Heartbeats
+    Agent {
+        /// URL des NUC egpu-managerd Remote-Listeners (z.B. http://100.64.x.x:7843)
+        #[arg(long)]
+        nuc_url: String,
+        /// Bearer-Token fuer Authentifizierung
+        #[arg(long, conflicts_with = "token_path")]
+        token: Option<String>,
+        /// Pfad zur Token-Datei
+        #[arg(long, conflicts_with = "token")]
+        token_path: Option<String>,
+        /// Name dieses GPU-Knotens (default: evo-x2)
+        #[arg(long, default_value = "evo-x2")]
+        name: String,
+        /// Heartbeat-Intervall in Sekunden
+        #[arg(long, default_value_t = 15)]
+        heartbeat_interval: u64,
+        /// Ollama-Port auf diesem Host
+        #[arg(long, default_value_t = 11434)]
+        port_ollama: u16,
+    },
 }
 
 #[tokio::main]
@@ -60,6 +82,17 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ocr { host, port } => {
             info!("Starte OCR-Server auf {host}:{port}");
             ocr::serve(&host, port).await
+        }
+        Commands::Agent {
+            nuc_url,
+            token,
+            token_path,
+            name,
+            heartbeat_interval,
+            port_ollama,
+        } => {
+            info!("Starte eGPU-Agent '{name}' → {nuc_url}");
+            agent::run(&nuc_url, token, token_path, &name, heartbeat_interval, port_ollama).await
         }
     }
 }

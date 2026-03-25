@@ -126,6 +126,7 @@ impl LlmRouter {
                     provider_cfg.base_url.clone(),
                     api_key,
                     provider_cfg.models.clone(),
+                    provider_cfg.request_timeout_seconds,
                 )),
             };
 
@@ -706,6 +707,7 @@ mod tests {
             priority: 1,
             cost_per_1m_input_tokens: 3.0,
             cost_per_1m_output_tokens: 15.0,
+            request_timeout_seconds: 120,
         };
 
         let cost = router.calculate_cost(&usage, Some(&provider_cfg));

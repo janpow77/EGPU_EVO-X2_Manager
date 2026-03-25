@@ -35,7 +35,7 @@ impl GpuMonitorBackend {
         }
     }
 
-    pub async fn query_all(&self) -> Result<Vec<GpuStatus>, GpuError> {
+    pub async fn query_all(&mut self) -> Result<Vec<GpuStatus>, GpuError> {
         match self {
             GpuMonitorBackend::Nvml(m) => m.query_all(),
             GpuMonitorBackend::NvidiaSmi(m) => m.query_all().await,
@@ -93,24 +93,86 @@ impl GpuMonitorBackend {
 
 pub struct NvmlGpuMonitor {
     nvml: Nvml,
+    /// Letzter bekannter device_count — bei Änderung wird NVML re-initialisiert.
+    /// Plain u32 reicht, da query_all(&mut self) exklusiven Zugriff garantiert.
+    last_device_count: u32,
 }
 
 impl NvmlGpuMonitor {
     pub fn new(_timeout_secs: u64) -> Result<Self, GpuError> {
         let nvml = Nvml::init().map_err(|e| GpuError::NvmlError(format!("NVML init: {e}")))?;
-        Ok(Self { nvml })
+        let count = nvml.device_count().unwrap_or(0);
+        Ok(Self {
+            nvml,
+            last_device_count: count,
+        })
+    }
+
+    /// Re-initialisiert NVML, um gecachte device_count zu aktualisieren.
+    /// Nötig bei Thunderbolt Hot-Plug, da NVML den device_count beim Init einfriert.
+    ///
+    /// SAFETY: Darf nur aufgerufen werden wenn keine Device<'_>-Handles existieren
+    /// (Rust Borrow-Checker erzwingt das über &mut self).
+    /// Drop des alten Nvml ruft nvmlShutdown() auf — ein sofortiges Nvml::init()
+    /// kann bei transientem Treiberzustand fehlschlagen, daher der ?-Propagate.
+    fn reinit(&mut self) -> Result<(), GpuError> {
+        info!("NVML Re-Init wegen GPU-Topologie-Änderung (Hot-Plug)");
+        let nvml = Nvml::init().map_err(|e| GpuError::NvmlError(format!("NVML reinit: {e}")))?;
+        let count = nvml.device_count().unwrap_or(0);
+        self.nvml = nvml;
+        self.last_device_count = count;
+        Ok(())
     }
 
     /// Query all GPUs via NVML.
-    pub fn query_all(&self) -> Result<Vec<GpuStatus>, GpuError> {
+    ///
+    /// NOTE: NVML-Aufrufe sind synchrone IOCTLs. Bei einem hängenden nvidia-Treiber
+    /// (z.B. während eGPU-Disconnect) kann dieser Aufruf blockieren. Ein Wrapping in
+    /// spawn_blocking wäre ideal, erfordert aber signifikante API-Umstrukturierung
+    /// (Ownership-Transfer). In der Praxis sind NVML-Aufrufe sub-Millisekunde.
+    pub fn query_all(&mut self) -> Result<Vec<GpuStatus>, GpuError> {
         let count = self
             .nvml
             .device_count()
             .map_err(|e| GpuError::NvmlError(format!("device_count: {e}")))?;
 
-        let mut gpus = Vec::with_capacity(count as usize);
+        // Hot-Plug-Erkennung: Wenn sich die Anzahl der GPUs geändert hat,
+        // NVML re-initialisieren damit neue Geräte sichtbar werden.
+        let mut did_reinit = false;
+        if count != self.last_device_count {
+            info!(
+                "GPU-Anzahl geändert: {} → {} — NVML Re-Init für Hot-Plug",
+                self.last_device_count, count
+            );
+            self.reinit()?;
+            did_reinit = true;
+        }
 
-        for idx in 0..count {
+        // Cross-Check via procfs: Wenn der nvidia-Treiber mehr GPUs kennt als
+        // NVML cached hat, einmalig Re-Init erzwingen. /proc/driver/nvidia/gpus
+        // wird vom Kernel-Modul gepflegt und ist unabhängig vom NVML-User-Space-Cache.
+        // Limitation: Bei Hot-Unplug kann procfs ebenfalls leer sein.
+        if !did_reinit {
+            let procfs_gpu_count = Self::count_nvidia_gpus_via_procfs();
+            if procfs_gpu_count > count {
+                info!(
+                    "procfs meldet {} NVIDIA-GPUs, NVML nur {} — erzwinge Re-Init",
+                    procfs_gpu_count, count
+                );
+                self.reinit()?;
+            }
+        }
+        // last_device_count ist bereits durch reinit() aktualisiert, oder
+        // wir übernehmen den aktuellen Wert wenn kein reinit nötig war.
+        self.last_device_count = self
+            .nvml
+            .device_count()
+            .unwrap_or(self.last_device_count);
+
+        let current_count = self.last_device_count;
+        let mut gpus = Vec::with_capacity(current_count as usize);
+
+        for idx in 0..current_count {
             match self.query_single_device(idx) {
                 Ok(gpu) => gpus.push(gpu),
                 Err(e) => {
@@ -121,12 +183,21 @@ impl NvmlGpuMonitor {
 
         if gpus.is_empty() {
             return Err(GpuError::NvmlError(
-                "Keine GPUs über NVML gefunden".to_string(),
+                format!("Keine GPUs über NVML gefunden (device_count={current_count}, alle fehlgeschlagen)"),
             ));
         }
 
         debug!("{} GPU(s) über NVML abgefragt", gpus.len());
         Ok(gpus)
+    }
+
+    /// Zählt NVIDIA-GPUs über procfs (unabhängig von NVML-User-Space-Cache).
+    /// Liest /proc/driver/nvidia/gpus/, gepflegt vom nvidia Kernel-Modul.
+    fn count_nvidia_gpus_via_procfs() -> u32 {
+        let Ok(entries) = std::fs::read_dir("/proc/driver/nvidia/gpus") else {
+            return 0;
+        };
+        entries.filter(|e| e.is_ok()).count() as u32
     }
 
     /// Query a single GPU by NVML index. Errors are non-fatal so callers

@@ -156,9 +156,15 @@ impl VramScheduler {
     }
 
     pub fn set_egpu_available(&mut self, available: bool) {
+        let changed = self.egpu_available != available;
         self.egpu_available = available;
-        if !available {
-            info!("eGPU nicht verfügbar — alle Workloads auf interner GPU");
+        if changed {
+            if available {
+                info!("eGPU wieder verfügbar — prüfe wartende Workloads");
+                self.try_dequeue();
+            } else {
+                info!("eGPU nicht verfügbar — alle Workloads auf interner GPU");
+            }
         }
     }
 
@@ -736,9 +742,7 @@ impl VramScheduler {
         Ok(results)
     }
 
-    #[cfg(test)]
     fn try_dequeue(&mut self) {
-        // Try to assign queued requests
         let mut retry = Vec::new();
         while let Some(request) = self.queue.pop_front() {
             if let Some(target) = self.resolve_target(&request) {

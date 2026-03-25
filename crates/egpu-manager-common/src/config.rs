@@ -682,6 +682,14 @@ pub struct LlmProviderConfig {
     /// Cost per 1M output tokens in USD
     #[serde(default)]
     pub cost_per_1m_output_tokens: f64,
+    /// HTTP-Request-Timeout in Sekunden (default 120).
+    /// Für Remote-Provider mit großen Modellen (z.B. 72B Cold-Start) erhöhen.
+    #[serde(default = "default_120_u64")]
+    pub request_timeout_seconds: u64,
+}
+
+fn default_120_u64() -> u64 {
+    120
 }
 
 /// App-spezifische Routing-Konfiguration

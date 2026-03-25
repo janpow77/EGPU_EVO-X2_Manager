@@ -227,9 +227,19 @@ token_path = "/etc/egpu-manager/remote-token.secret"
 
 [llm_gateway]
 enabled = true
-default_provider = "ollama-egpu"
+default_provider = "ollama-evo-x2"
 
 # --- LLM Provider ---
+
+[[llm_gateway.providers]]
+name = "ollama-evo-x2"
+provider_type = "openai_compatible"
+base_url = "http://TAILSCALE_IP:11434"   # TODO: Tailscale-IP nach EVO-X2 Setup eintragen
+api_key_ref = ""
+models = ["qwen3:72b", "dolphin3:72b", "bge-m3", "bge-reranker-v2-m3"]
+enabled = true
+priority = 0
+request_timeout_seconds = 300            # 5 Min — Dolphin-72B Cold-Start auf 120 GB GTT
 
 [[llm_gateway.providers]]
 name = "ollama-egpu"
@@ -250,36 +260,53 @@ enabled = true
 priority = 2
 
 # --- App-Routing: Jede App bekommt eigene GPU/Modell-Präferenzen ---
+# EVO-X2 ist primary für LLM/Embeddings, lokale GPUs als Fallback.
+# love-ai hat NUR EVO-X2 (kein Fallback gewünscht).
 
 [[llm_gateway.app_routing]]
 app_id = "audit_designer"
-preferred_provider = "ollama-egpu"
-allowed_providers = ["ollama-egpu", "ollama-internal"]
-workload_model_map = { embeddings = "nomic-embed-text", llm = "qwen3:14b" }
+preferred_provider = "ollama-evo-x2"
+allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
+workload_model_map = { llm = "qwen3:72b", embeddings = "bge-m3", reranking = "bge-reranker-v2-m3" }
 
 [[llm_gateway.app_routing]]
 app_id = "flowinvoice"
-preferred_provider = "ollama-egpu"
-allowed_providers = ["ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen3:14b", ocr = "qwen3:14b" }
+preferred_provider = "ollama-evo-x2"
+allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
+workload_model_map = { llm = "qwen3:72b", ocr = "qwen3:14b" }
 
 [[llm_gateway.app_routing]]
 app_id = "flowstat"
-preferred_provider = "ollama-egpu"
-allowed_providers = ["ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen3:14b" }
+preferred_provider = "ollama-evo-x2"
+allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
+workload_model_map = { llm = "qwen3:72b" }
 
 [[llm_gateway.app_routing]]
 app_id = "riskanalysis"
-preferred_provider = "ollama-egpu"
-allowed_providers = ["ollama-egpu", "ollama-internal"]
-workload_model_map = { embeddings = "nomic-embed-text", llm = "qwen3:14b" }
+preferred_provider = "ollama-evo-x2"
+allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
+workload_model_map = { llm = "qwen3:72b", embeddings = "bge-m3" }
 
 [[llm_gateway.app_routing]]
 app_id = "love-ai"
-preferred_provider = "ollama-egpu"
-allowed_providers = ["ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen3:14b", embeddings = "nomic-embed-text" }
+preferred_provider = "ollama-evo-x2"
+allowed_providers = ["ollama-evo-x2"]
+workload_model_map = { llm = "dolphin3:72b", embeddings = "bge-m3" }
+
+# --- Remote GPUs ---
+
+[[remote_gpu]]
+name = "evo-x2"
+host = "TAILSCALE_IP"                    # TODO: Tailscale-IP nach Setup eintragen
+port_ollama = 11434
+port_llama_cpp = 8080
+port_egpu_agent = 8899
+gpu_name = "AMD Radeon (Strix Halo iGPU)"
+vram_mb = 122880
+availability = "always"
+auto_assign = true
+priority = 1
+max_latency_ms = { llm = 100, embeddings = 200, batch = 1000 }
 
 [[remote_gpu]]
 name = "remote-desktop"
@@ -289,4 +316,4 @@ port_egpu_agent = 8899
 gpu_name = "NVIDIA GeForce RTX 5060 Ti"
 vram_mb = 16384
 availability = "on-demand"
-auto_assign = false
+auto_assign = true

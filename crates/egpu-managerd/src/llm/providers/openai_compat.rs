@@ -21,9 +21,10 @@ impl OpenAiCompatProvider {
         base_url: String,
         api_key: Option<String>,
         models: Vec<String>,
+        timeout_seconds: u64,
     ) -> Self {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(timeout_seconds))
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -106,6 +107,7 @@ mod tests {
             "http://localhost:11434".into(),
             None,
             vec![],
+            120,
         );
         assert!(provider.supports_model("any-model"));
     }
@@ -117,6 +119,7 @@ mod tests {
             "http://localhost:11434".into(),
             None,
             vec!["qwen3:14b".into(), "llama3:8b".into()],
+            120,
         );
         assert!(provider.supports_model("qwen3:14b"));
         assert!(!provider.supports_model("gpt-4"));
@@ -129,6 +132,7 @@ mod tests {
             "http://localhost:11434/".into(),
             None,
             vec![],
+            120,
         );
         assert_eq!(provider.base_url, "http://localhost:11434");
     }
