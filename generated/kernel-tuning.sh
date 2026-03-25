@@ -131,16 +131,62 @@ if [[ "$SKIP_NVIDIA" == false ]]; then
     fi
 
     if [[ "$DRY_RUN" == false ]]; then
-        echo "options nvidia NVreg_EnablePCIeRelaxedOrderingMode=1" > "$MODPROBE_FILE"
+        cat > "$MODPROBE_FILE" << MODEOF
+# eGPU Manager: NVIDIA-Treiberparameter für PCIe-Stabilität
+options nvidia NVreg_EnablePCIeRelaxedOrderingMode=1
+options nvidia NVreg_DynamicPowerManagement=0x00
+MODEOF
         echo "NVIDIA-Parameter geschrieben: $MODPROBE_FILE"
+        echo "  - NVreg_EnablePCIeRelaxedOrderingMode=1 (Relaxed Ordering)"
+        echo "  - NVreg_DynamicPowerManagement=0x00 (kein GPU-Suspend)"
         echo "Wird erst nach Neustart oder Treiber-Reload wirksam."
     else
         echo "[DRY-RUN] Würde NVreg_EnablePCIeRelaxedOrderingMode=1 setzen"
+        echo "[DRY-RUN] Würde NVreg_DynamicPowerManagement=0x00 setzen"
     fi
     echo ""
 fi
 
-# --- 4. sysctl-Parameter ---
+# --- 4. Runtime PM deaktivieren für eGPU + TB-Bridge (egpu-pcie-fix.service) ---
+echo "--- Runtime PM: eGPU + Thunderbolt-Bridge ---"
+PCIE_FIX_UNIT="/etc/systemd/system/egpu-pcie-fix.service"
+
+if [[ "$DRY_RUN" == false ]]; then
+    cat > "$PCIE_FIX_UNIT" << FIXEOF
+[Unit]
+Description=eGPU Runtime PM Deaktivierung (eGPU + TB-Bridge)
+After=multi-user.target
+Before=egpu-manager.service
+
+[Service]
+Type=oneshot
+# Runtime PM für eGPU deaktivieren (verhindert GPU-Suspend)
+ExecStart=/bin/bash -c 'echo on > /sys/bus/pci/devices/$EGPU_PCI/power/control 2>/dev/null || true'
+# Runtime PM für Thunderbolt Root-Port deaktivieren
+ExecStart=/bin/bash -c 'echo on > /sys/bus/pci/devices/$ROOT_PORT/power/control 2>/dev/null || true'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+FIXEOF
+
+    # Sofort setzen
+    echo on > /sys/bus/pci/devices/$EGPU_PCI/power/control 2>/dev/null || true
+    echo on > /sys/bus/pci/devices/$ROOT_PORT/power/control 2>/dev/null || true
+    echo "Runtime PM deaktiviert für:"
+    echo "  eGPU:      $EGPU_PCI → $(cat /sys/bus/pci/devices/$EGPU_PCI/power/control 2>/dev/null || echo 'nicht lesbar')"
+    echo "  TB-Bridge: $ROOT_PORT → $(cat /sys/bus/pci/devices/$ROOT_PORT/power/control 2>/dev/null || echo 'nicht lesbar')"
+    echo "systemd-Unit erstellt: $PCIE_FIX_UNIT"
+    echo "Aktivierung muss MANUELL erfolgen:"
+    echo "  sudo systemctl daemon-reload"
+    echo "  sudo systemctl enable egpu-pcie-fix.service"
+else
+    echo "[DRY-RUN] Würde Runtime PM für $EGPU_PCI und $ROOT_PORT deaktivieren"
+    echo "[DRY-RUN] Würde egpu-pcie-fix.service erstellen"
+fi
+echo ""
+
+# --- 5. sysctl-Parameter ---  (war vorher 4)
 echo "--- sysctl: kernel.nmi_watchdog=0 ---"
 SYSCTL_FILE="/etc/sysctl.d/99-egpu-manager.conf"
 
@@ -189,7 +235,8 @@ echo "Nächste Schritte:"
 echo "  1. sudo update-grub (falls GRUB geändert)"
 echo "  2. sudo systemctl daemon-reload"
 echo "  3. sudo systemctl enable egpu-pcie-tuning.service"
-echo "  4. BIOS-Einstellungen prüfen"
-echo "  5. Neustart durchführen"
+echo "  4. sudo systemctl enable egpu-pcie-fix.service"
+echo "  5. BIOS-Einstellungen prüfen"
+echo "  6. Neustart durchführen"
 echo ""
 echo "Bei Problemen: sudo bash kernel-tuning-rollback.sh"

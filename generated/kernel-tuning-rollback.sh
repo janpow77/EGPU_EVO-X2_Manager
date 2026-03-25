@@ -14,13 +14,20 @@ fi
 echo "=== eGPU Kernel-Tuning Rollback ==="
 echo ""
 
-# 1. systemd-Unit entfernen
-echo "--- systemd-Unit entfernen ---"
+# 1. systemd-Units entfernen
+echo "--- systemd-Units entfernen ---"
 if systemctl is-enabled egpu-pcie-tuning.service &>/dev/null; then
     systemctl disable egpu-pcie-tuning.service
     echo "egpu-pcie-tuning.service deaktiviert"
 fi
 rm -f /etc/systemd/system/egpu-pcie-tuning.service
+
+if systemctl is-enabled egpu-pcie-fix.service &>/dev/null; then
+    systemctl disable egpu-pcie-fix.service
+    echo "egpu-pcie-fix.service deaktiviert"
+fi
+rm -f /etc/systemd/system/egpu-pcie-fix.service
+
 systemctl daemon-reload 2>/dev/null || true
 echo "Fertig."
 
@@ -36,18 +43,24 @@ else
     echo "pcie_aspm=off war nicht gesetzt."
 fi
 
-# 3. NVIDIA-Treiberparameter entfernen
+# 3. NVIDIA-Treiberparameter entfernen (inkl. DynamicPowerManagement)
 echo "--- NVIDIA-Treiberparameter entfernen ---"
 rm -f /etc/modprobe.d/nvidia-egpu.conf
+echo "Fertig. (NVreg_EnablePCIeRelaxedOrderingMode + NVreg_DynamicPowerManagement entfernt)"
+
+# 4. Runtime PM zurücksetzen (auf auto = Kernel-Default)
+echo "--- Runtime PM zurücksetzen ---"
+echo auto > /sys/bus/pci/devices/0000:05:00.0/power/control 2>/dev/null || true
+echo auto > /sys/bus/pci/devices/0000:00:07.0/power/control 2>/dev/null || true
 echo "Fertig."
 
-# 4. sysctl-Datei entfernen
+# 5. sysctl-Datei entfernen
 echo "--- sysctl entfernen ---"
 rm -f /etc/sysctl.d/99-egpu-manager.conf
 sysctl -w kernel.nmi_watchdog=1 2>/dev/null || true
 echo "Fertig."
 
-# 5. AER-Masking zurücksetzen
+# 6. AER-Masking zurücksetzen
 echo "--- AER-Masking zurücksetzen ---"
 setpci -s 0000:05:00.0 ECAP_AER+0x08.L=0x00000000 2>/dev/null || true
 echo "Fertig."

@@ -1656,13 +1656,53 @@ Der NVIDIA-Treiber hat undokumentierte Registry-Parameter die die PCIe-Fehlertol
 ```bash
 # /etc/modprobe.d/nvidia-egpu.conf
 options nvidia NVreg_EnablePCIeRelaxedOrderingMode=1
+options nvidia NVreg_DynamicPowerManagement=0x00
 ```
 
 `NVreg_EnablePCIeRelaxedOrderingMode=1` erlaubt dem Treiber PCIe-Transaktionen in beliebiger Reihenfolge abzuschließen. Das reduziert die Wahrscheinlichkeit von CmpltTOs weil der Treiber nicht auf die Completion einer spezifischen Transaktion warten muss bevor er die nächste abschickt.
 
+`NVreg_DynamicPowerManagement=0x00` deaktiviert das NVIDIA Dynamic Power Management vollständig. Ohne diesen Parameter kann der Treiber die eGPU in einen Suspend-Zustand versetzen, aus dem das Aufwachen über Thunderbolt unzuverlässig ist und zu PCIe-Timeouts führen kann. Die eGPU bleibt im Idle bei ca. 5W Verbrauch — ein akzeptabler Trade-off für die gewonnene Stabilität.
+
+| Wert | Bedeutung |
+|---|---|
+| `0x00` | Deaktiviert (GPU bleibt immer aktiv) |
+| `0x01` | Coarse-Grained (Default bei Laptops, D3cold) |
+| `0x02` | Fine-Grained (aggressivstes PM, für Optimus) |
+
 **WARNUNG:** Diese Parameter sind undokumentiert und können sich zwischen Treiberversionen ändern. Das Skript prüft die installierte Treiberversion und gibt eine Warnung aus wenn sie von der getesteten Version abweicht.
 
 **Getestete Treiberversion:** 576.02 (CUDA 13.x). Bei anderen Versionen: Parameter manuell testen.
+
+### 8.3a Runtime PM deaktivieren (egpu-pcie-fix.service)
+
+Linux Runtime PM kann PCIe-Geräte eigenständig in Low-Power-States versetzen — unabhängig von ASPM und NVIDIA DynamicPowerManagement. Für eGPU-Setups muss Runtime PM explizit für die eGPU und die Thunderbolt-Bridge deaktiviert werden:
+
+```bash
+# Sofort setzen:
+echo on > /sys/bus/pci/devices/0000:05:00.0/power/control  # eGPU
+echo on > /sys/bus/pci/devices/0000:00:07.0/power/control  # TB Root-Port
+```
+
+**Reboot-persistent** via systemd-Einheit:
+
+```ini
+# /etc/systemd/system/egpu-pcie-fix.service
+[Unit]
+Description=eGPU Runtime PM Deaktivierung (eGPU + TB-Bridge)
+After=multi-user.target
+Before=egpu-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'echo on > /sys/bus/pci/devices/0000:05:00.0/power/control'
+ExecStart=/bin/bash -c 'echo on > /sys/bus/pci/devices/0000:00:07.0/power/control'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`power/control = on` bedeutet: der Kernel darf das Gerät **nie** automatisch suspendieren. Im Gegensatz zu `auto` (Default) bleibt das Gerät permanent aktiv. Dies hat keinen Nachteil — der Stromverbrauch wird bereits durch `NVreg_DynamicPowerManagement=0x00` auf ~5W im Idle begrenzt.
 
 ### 8.4 AER-Masking (optional, riskant)
 
@@ -1702,12 +1742,13 @@ kernel.nmi_watchdog=0             # NMI-Interrupts bei hoher PCIe-Last reduziere
 ### 8.7 Rollback
 
 Das Skript erzeugt ein Rollback-Skript `kernel-tuning-rollback.sh` das:
-1. Die systemd-Einheit `egpu-pcie-tuning.service` deaktiviert und entfernt.
+1. Die systemd-Einheiten `egpu-pcie-tuning.service` und `egpu-pcie-fix.service` deaktiviert und entfernt.
 2. Die GRUB-Parameter zurücksetzt (`pcie_aspm` entfernen).
-3. Die NVIDIA-Treiberparameter entfernt (`/etc/modprobe.d/nvidia-egpu.conf`).
-4. Die sysctl-Datei entfernt.
-5. AER-Masking zurücksetzt (falls aktiviert).
-6. `update-grub` und `update-initramfs -u` ausführt.
+3. Die NVIDIA-Treiberparameter entfernt (`/etc/modprobe.d/nvidia-egpu.conf` — inkl. DynamicPowerManagement).
+4. Runtime PM auf `auto` zurücksetzt (eGPU + TB-Bridge).
+5. Die sysctl-Datei entfernt.
+6. AER-Masking zurücksetzt (falls aktiviert).
+7. `update-grub` und `update-initramfs -u` ausführt.
 
 Falls das System nach dem Kernel-Tuning nicht mehr korrekt startet, kann der Nutzer über den Recovery-Modus (GRUB → Advanced → Recovery) das Rollback-Skript ausführen.
 
