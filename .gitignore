@@ -8,3 +8,8 @@ __pycache__/
 .claude/
 /etc/
 install-stable-link.sh
+
+# VPN Router secrets
+crates/vpn-router/configs/*
+!crates/vpn-router/configs/.gitkeep
+crates/vpn-router/.env
