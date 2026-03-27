@@ -244,10 +244,22 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
     }
 
     notebook.set_vexpand(true);
+    // Wichtig: Erst current_page setzen, DANN Signal verbinden.
+    // append_page triggert intern switch_page mit Seite 0 — das darf
+    // ACTIVE_TAB nicht überschreiben.
     notebook.set_current_page(Some(saved_tab));
-    notebook.connect_switch_page(|_, _, page_num| {
-        ACTIVE_TAB.with(|t| t.set(page_num));
+    let restored_tab = saved_tab;
+    // Signal blockiert kurz: erst nach show_all aktiv, damit GTK
+    // keine spurious switch_page Events den gespeicherten Tab killen.
+    let inhibit = std::rc::Rc::new(std::cell::Cell::new(true));
+    let inhibit_clone = inhibit.clone();
+    notebook.connect_switch_page(move |_, _, page_num| {
+        if !inhibit_clone.get() {
+            ACTIVE_TAB.with(|t| t.set(page_num));
+        }
     });
+    // Nochmal sicherstellen nach Signal-Verbindung
+    notebook.set_current_page(Some(restored_tab));
 
     outer.pack_start(&notebook, true, true, 0);
 
@@ -276,6 +288,8 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
 
     window.add(&outer);
     window.show_all();
+    // Jetzt Signal freigeben — GTK hat alle spurious switch_page Events gefeuert
+    inhibit.set(false);
 }
 
 // ── Tab 1: Services ──
