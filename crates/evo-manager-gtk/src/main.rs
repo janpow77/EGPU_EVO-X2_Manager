@@ -70,25 +70,42 @@ fn main() {
     let popup_update = Rc::clone(&popup_ref);
     let tray_update = Rc::clone(&tray_indicator);
     let last_color: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let last_state: Rc<RefCell<Option<WidgetState>>> = Rc::new(RefCell::new(None));
 
     glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+        // Channel komplett drainieren, nur den letzten State behalten
+        let mut latest: Option<WidgetState> = None;
         while let Ok(state) = rx.try_recv() {
-            // Update tray icon color
-            let color = state.warning_color().to_string();
-            {
-                let mut lc = last_color.borrow_mut();
-                if *lc != color {
-                    if let Some(ref mut ind) = *tray_update.borrow_mut() {
-                        tray::update_tray_icon(ind, &color);
-                    }
-                    *lc = color;
-                }
-            }
+            latest = Some(state);
+        }
 
-            // Update popup if visible
-            let win = popup_update.borrow();
-            if win.is_visible() {
-                popup::update_popup(&win, &state);
+        if let Some(state) = latest {
+            // Nur updaten wenn sich der State tatsächlich geändert hat
+            let changed = {
+                let prev = last_state.borrow();
+                prev.as_ref() != Some(&state)
+            };
+
+            if changed {
+                // Tray-Icon Farbe
+                let color = state.warning_color().to_string();
+                {
+                    let mut lc = last_color.borrow_mut();
+                    if *lc != color {
+                        if let Some(ref mut ind) = *tray_update.borrow_mut() {
+                            tray::update_tray_icon(ind, &color);
+                        }
+                        *lc = color;
+                    }
+                }
+
+                // Popup nur wenn sichtbar
+                let win = popup_update.borrow();
+                if win.is_visible() {
+                    popup::update_popup(&win, &state);
+                }
+
+                *last_state.borrow_mut() = Some(state);
             }
         }
         glib::ControlFlow::Continue

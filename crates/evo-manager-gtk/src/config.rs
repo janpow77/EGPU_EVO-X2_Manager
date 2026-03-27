@@ -17,12 +17,17 @@ pub struct EvoConfig {
     pub github_url: String,
     #[serde(default)]
     pub setup_dir: String,
+    #[serde(default)]
+    pub tailscale_ip: String,
+    #[serde(default = "default_network_mode")]
+    pub network_mode: String,
 }
 
 fn default_ip() -> String { String::new() }
 fn default_port() -> u16 { 8084 }
 fn default_user() -> String { "jan".into() }
 fn default_poll() -> u64 { 5 }
+fn default_network_mode() -> String { "lan".into() }
 
 impl Default for EvoConfig {
     fn default() -> Self {
@@ -34,6 +39,8 @@ impl Default for EvoConfig {
             poll_interval_secs: default_poll(),
             github_url: String::new(),
             setup_dir: format!("{home}/Projekte/evo/setup"),
+            tailscale_ip: String::new(),
+            network_mode: default_network_mode(),
         }
     }
 }
@@ -67,6 +74,10 @@ impl EvoConfig {
     }
 
     pub fn metrics_url(&self) -> String {
-        format!("http://{}:{}/metrics", self.evo_ip, self.metrics_port)
+        let ip = match self.network_mode.as_str() {
+            "tailscale" if !self.tailscale_ip.is_empty() => &self.tailscale_ip,
+            _ => &self.evo_ip,
+        };
+        format!("http://{}:{}/metrics", ip, self.metrics_port)
     }
 }

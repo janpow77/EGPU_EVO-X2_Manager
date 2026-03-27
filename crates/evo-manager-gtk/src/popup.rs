@@ -58,10 +58,12 @@ window {
 }
 .badge-active { background-color: rgba(118,185,0,0.15); color: #76b900; }
 .badge-inactive { background-color: rgba(239,68,68,0.15); color: #ef4444; }
-.badge-vulkan { background-color: rgba(118,185,0,0.15); color: #76b900; }
 .badge-rocm { background-color: rgba(0,176,240,0.15); color: #00b0f0; }
+.badge-axum { background-color: rgba(156,154,146,0.15); color: #9c9a92; }
 .badge-ok { background-color: rgba(118,185,0,0.15); color: #76b900; }
 .badge-missing { background-color: rgba(239,68,68,0.15); color: #ef4444; }
+.badge-mode-active { background-color: rgba(118,185,0,0.25); color: #76b900; font-weight: bold; }
+.badge-mode-inactive { background-color: rgba(107,114,128,0.1); color: #9c9a92; }
 .res-card {
     background-color: #2a2a27;
     border-radius: 8px;
@@ -89,6 +91,14 @@ window {
     font-size: 11px;
     font-weight: bold;
 }
+.model-card {
+    background-color: #2a2a27;
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 4px;
+}
+.model-name { font-size: 11px; font-weight: bold; }
+.model-detail { font-size: 9px; color: #9c9a92; }
 entry {
     background-color: #1e1e1c;
     color: #e8e7e0;
@@ -108,16 +118,15 @@ separator { background-color: #444440; min-height: 1px; margin-top: 8px; margin-
 struct SvcInfo {
     name: &'static str,
     port: u16,
-    model: &'static str,
+    default_detail: &'static str,
     backend: &'static str,
     badge_class: &'static str,
 }
 
 const SERVICES: &[SvcInfo] = &[
-    SvcInfo { name: "llama-creative",  port: 8080, model: "Mistral Small 3.1 24B", backend: "Vulkan", badge_class: "badge-vulkan" },
-    SvcInfo { name: "llama-code",      port: 8081, model: "Qwen3-32B",             backend: "ROCm",   badge_class: "badge-rocm" },
-    SvcInfo { name: "llama-embedding", port: 8082, model: "Nomic-Embed v1.5",      backend: "ROCm",   badge_class: "badge-rocm" },
-    SvcInfo { name: "llama-ocr",       port: 8083, model: "Docling",               backend: "ROCm",   badge_class: "badge-rocm" },
+    SvcInfo { name: "ollama",       port: 11434, default_detail: "LLM Inference",    backend: "ROCm",  badge_class: "badge-rocm" },
+    SvcInfo { name: "evo-metrics",  port: 8084,  default_detail: "System-Metriken",  backend: "Axum",  badge_class: "badge-axum" },
+    SvcInfo { name: "evo-webhook",  port: 9000,  default_detail: "GitHub Webhook",   backend: "Axum",  badge_class: "badge-axum" },
 ];
 
 pub fn build_popup() -> Window {
@@ -155,9 +164,6 @@ pub fn build_popup() -> Window {
 pub fn update_popup(window: &Window, state: &WidgetState) {
     let saved_tab = ACTIVE_TAB.with(|t| t.get());
 
-    // Nur die dynamischen Tabs (Services, Ressourcen) neubauen.
-    // Setup und Config sind statisch und werden nur einmal gebaut.
-    // Die Status-Bar wird immer aktualisiert.
     if let Some(child) = window.children().first() {
         window.remove(child);
     }
@@ -210,28 +216,19 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
     let notebook = Notebook::new();
     notebook.set_tab_pos(gtk::PositionType::Top);
 
-    // Tab 1+2: Dynamisch (werden bei jedem Update neu gebaut)
+    // Tab 1: Services (dynamisch)
     let tab1 = build_tab_services(state);
     notebook.append_page(&tab1, Some(&make_tab_label("network-server", "Services")));
 
+    // Tab 2: Ressourcen (dynamisch)
     let tab2 = build_tab_resources(state);
     notebook.append_page(&tab2, Some(&make_tab_label("utilities-system-monitor", "Ressourcen")));
 
-    // Tab 3+4: Statisch — nur neubauen wenn sichtbar (vermeidet Dateisystem-Zugriffe)
-    if saved_tab == 2 {
-        let tab3 = build_tab_setup();
-        notebook.append_page(&tab3, Some(&make_tab_label("drive-harddisk", "Setup")));
-    } else {
-        let placeholder = GtkBox::new(Orientation::Vertical, 0);
-        let lbl = Label::new(Some("Tab anklicken zum Laden..."));
-        lbl.style_context().add_class("muted");
-        lbl.set_margin_top(20);
-        placeholder.pack_start(&lbl, false, false, 0);
-        let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
-        scroll.add(&placeholder);
-        notebook.append_page(&scroll, Some(&make_tab_label("drive-harddisk", "Setup")));
-    }
+    // Tab 3: Ollama-Modelle (dynamisch)
+    let tab3 = build_tab_ollama(state);
+    notebook.append_page(&tab3, Some(&make_tab_label("applications-other", "Modelle")));
 
+    // Tab 4: Config (lazy-loaded)
     if saved_tab == 3 {
         let tab4 = build_tab_config();
         notebook.append_page(&tab4, Some(&make_tab_label("preferences-system", "Config")));
@@ -327,9 +324,32 @@ fn build_tab_services(state: &WidgetState) -> ScrolledWindow {
 
         card.pack_start(&header, false, false, 0);
 
-        let detail = Label::new(Some(svc.model));
+        // Ollama: Zeige dynamisch geladene Modelle
+        let detail_text = if svc.name == "ollama" {
+            state.metrics.as_ref()
+                .and_then(|m| m.ollama.as_ref())
+                .map(|o| {
+                    if o.running_models.is_empty() {
+                        "Keine Modelle geladen".to_string()
+                    } else {
+                        o.running_models.iter()
+                            .map(|m| {
+                                let short = m.name.split(':').next().unwrap_or(&m.name);
+                                format!("{short} ({:.0} GB, {})", m.size_gb, m.processor)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" + ")
+                    }
+                })
+                .unwrap_or_else(|| svc.default_detail.to_string())
+        } else {
+            svc.default_detail.to_string()
+        };
+
+        let detail = Label::new(Some(&detail_text));
         detail.style_context().add_class("svc-detail");
         detail.set_halign(Align::Start);
+        detail.set_line_wrap(true);
         card.pack_start(&detail, false, false, 0);
 
         content.pack_start(&card, false, false, 0);
@@ -355,11 +375,37 @@ fn build_tab_resources(state: &WidgetState) -> ScrolledWindow {
     content.set_margin_top(8);
 
     if let Some(ref m) = state.metrics {
+        // GTT
         content.pack_start(&build_resource_bar("GTT Speicher", m.gtt.used_gb, m.gtt.total_gb, "GB",
             if m.gtt.total_bytes > 0 { m.gtt.used_bytes as f64 / m.gtt.total_bytes as f64 } else { 0.0 }), false, false, 0);
+
+        // RAM
         content.pack_start(&build_resource_bar("RAM", m.ram.used_gb, m.ram.total_gb, "GB",
             if m.ram.total_bytes > 0 { m.ram.used_bytes as f64 / m.ram.total_bytes as f64 } else { 0.0 }), false, false, 0);
 
+        // GPU Temperatur
+        if let Some(temp) = m.gpu.temperature_c {
+            let card = GtkBox::new(Orientation::Horizontal, 8);
+            card.style_context().add_class("res-card");
+            let label = Label::new(Some("GPU Temperatur"));
+            label.style_context().add_class("res-label");
+            card.pack_start(&label, false, false, 0);
+            let val = Label::new(Some(&format!("{temp} \u{00B0}C")));
+            val.style_context().add_class("res-val");
+            val.style_context().add_class(if temp > 85 { "red" } else if temp > 70 { "yellow" } else { "green" });
+            val.set_halign(Align::End);
+            val.set_hexpand(true);
+            card.pack_start(&val, true, true, 0);
+            content.pack_start(&card, false, false, 0);
+        }
+
+        // GPU Auslastung
+        if let Some(util) = m.gpu.utilization_pct {
+            content.pack_start(&build_resource_bar("GPU Auslastung", util as f64, 100.0, "%",
+                util as f64 / 100.0), false, false, 0);
+        }
+
+        // CPU Load
         let cpu_card = GtkBox::new(Orientation::Vertical, 2);
         cpu_card.style_context().add_class("res-card");
         let cpu_header = GtkBox::new(Orientation::Horizontal, 8);
@@ -376,12 +422,41 @@ fn build_tab_resources(state: &WidgetState) -> ScrolledWindow {
         cpu_card.pack_start(&cpu_header, false, false, 0);
         content.pack_start(&cpu_card, false, false, 0);
 
+        // Disk
+        for disk in &m.disks {
+            let pct = if disk.total_gb > 0.0 { disk.used_gb / disk.total_gb } else { 0.0 };
+            let label = format!("Disk {}", disk.mount);
+            content.pack_start(&build_resource_bar(&label, disk.used_gb, disk.total_gb, "GB", pct), false, false, 0);
+        }
+
         content.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
+
+        // System-Info (dynamisch aus Metrics)
         let info_title = Label::new(Some("SYSTEM"));
         info_title.style_context().add_class("section-title");
         info_title.set_halign(Align::Start);
         content.pack_start(&info_title, false, false, 0);
-        for (l, v) in &[("SoC", "AMD Ryzen AI Max+ 395"), ("GPU", "RDNA 3.5, 40 CUs"), ("RAM", "128 GB LPDDR5X")] {
+
+        let sys = &m.system;
+        let mut sys_rows: Vec<(&str, String)> = Vec::new();
+        if !sys.soc.is_empty() { sys_rows.push(("SoC", sys.soc.clone())); }
+        if !sys.gpu_arch.is_empty() { sys_rows.push(("GPU", sys.gpu_arch.clone())); }
+        if !sys.ram_spec.is_empty() { sys_rows.push(("RAM", sys.ram_spec.clone())); }
+        if sys.cpu_cores > 0 { sys_rows.push(("Kerne", format!("{}", sys.cpu_cores))); }
+        if sys.uptime_seconds > 0 {
+            let h = sys.uptime_seconds / 3600;
+            let min = (sys.uptime_seconds % 3600) / 60;
+            sys_rows.push(("Uptime", format!("{h}h {min}m")));
+        }
+
+        // Tailscale-IP
+        if let Some(ref ts) = m.tailscale {
+            if let Some(ref ip) = ts.ip {
+                sys_rows.push(("Tailscale", ip.clone()));
+            }
+        }
+
+        for (l, v) in &sys_rows {
             let row = GtkBox::new(Orientation::Horizontal, 8);
             let lbl = Label::new(Some(l)); lbl.style_context().add_class("res-label"); row.pack_start(&lbl, false, false, 0);
             let val = Label::new(Some(v)); val.style_context().add_class("res-val"); val.set_halign(Align::End); val.set_hexpand(true);
@@ -399,97 +474,116 @@ fn build_tab_resources(state: &WidgetState) -> ScrolledWindow {
     scroll
 }
 
-// ── Tab 3: Setup (USB-Erstellung) ──
+// ── Tab 3: Ollama-Modelle ──
 
-fn build_tab_setup() -> ScrolledWindow {
+fn build_tab_ollama(state: &WidgetState) -> ScrolledWindow {
     let content = GtkBox::new(Orientation::Vertical, 4);
     content.set_margin_start(8);
     content.set_margin_end(8);
     content.set_margin_top(8);
 
-    let config = EvoConfig::load();
-    let setup_dir = std::path::PathBuf::from(&config.setup_dir);
+    let ollama = state.metrics.as_ref().and_then(|m| m.ollama.as_ref());
 
-    // Checklist
-    let title = Label::new(Some("USB-PAKET STATUS"));
-    title.style_context().add_class("section-title");
-    title.set_halign(Align::Start);
-    content.pack_start(&title, false, false, 0);
+    match ollama {
+        Some(info) => {
+            // Laufende Modelle
+            let title = Label::new(Some("LAUFENDE MODELLE"));
+            title.style_context().add_class("section-title");
+            title.set_halign(Align::Start);
+            content.pack_start(&title, false, false, 0);
 
-    let checks = [
-        ("Secrets (.env)", setup_dir.join("secrets/.env").exists()),
-        ("SSH-Keys", setup_dir.join("config/authorized_keys").exists()),
-        ("Ubuntu Autoinstall", setup_dir.join("autoinstall/user-data").exists()),
-        ("Ubuntu ISO", setup_dir.join("iso").is_dir() && std::fs::read_dir(setup_dir.join("iso")).map(|d| d.count() > 0).unwrap_or(false)),
-        ("Kernel-Pakete", setup_dir.join("kernel").is_dir() && std::fs::read_dir(setup_dir.join("kernel")).map(|d| d.count() > 0).unwrap_or(false)),
-        ("amdgpu Firmware", setup_dir.join("firmware").is_dir() && std::fs::read_dir(setup_dir.join("firmware")).map(|d| d.count() > 0).unwrap_or(false)),
-        ("Container-Images", setup_dir.join("container/llama-vulkan-amdvlk.tar").exists() && setup_dir.join("container/llama-rocm.tar").exists()),
-    ];
+            if info.running_models.is_empty() {
+                let lbl = Label::new(Some("Keine Modelle geladen"));
+                lbl.style_context().add_class("muted");
+                lbl.set_halign(Align::Start);
+                content.pack_start(&lbl, false, false, 0);
+            } else {
+                for model in &info.running_models {
+                    let card = GtkBox::new(Orientation::Vertical, 2);
+                    card.style_context().add_class("model-card");
 
-    let all_ok = checks.iter().all(|(_, ok)| *ok);
+                    let header = GtkBox::new(Orientation::Horizontal, 6);
+                    let dot = Label::new(Some("\u{25CF}"));
+                    dot.style_context().add_class("green");
+                    header.pack_start(&dot, false, false, 0);
 
-    for (name, ok) in &checks {
-        let row = GtkBox::new(Orientation::Horizontal, 8);
-        row.style_context().add_class("svc-card");
+                    let name = Label::new(Some(&model.name));
+                    name.style_context().add_class("model-name");
+                    name.set_hexpand(true);
+                    name.set_halign(Align::Start);
+                    name.set_line_wrap(true);
+                    header.pack_start(&name, true, true, 0);
 
-        let icon = Label::new(Some(if *ok { "\u{2705}" } else { "\u{274C}" }));
-        row.pack_start(&icon, false, false, 0);
+                    card.pack_start(&header, false, false, 0);
 
-        let lbl = Label::new(Some(name));
-        lbl.style_context().add_class("svc-name");
-        lbl.set_hexpand(true);
-        lbl.set_halign(Align::Start);
-        row.pack_start(&lbl, true, true, 0);
+                    let detail = format!(
+                        "{:.1} GB total \u{2022} {:.1} GB VRAM \u{2022} {}",
+                        model.size_gb, model.vram_gb, model.processor
+                    );
+                    let detail_lbl = Label::new(Some(&detail));
+                    detail_lbl.style_context().add_class("model-detail");
+                    detail_lbl.set_halign(Align::Start);
+                    card.pack_start(&detail_lbl, false, false, 0);
 
-        let badge = Label::new(Some(if *ok { "OK" } else { "fehlt" }));
-        badge.style_context().add_class("svc-badge");
-        badge.style_context().add_class(if *ok { "badge-ok" } else { "badge-missing" });
-        row.pack_start(&badge, false, false, 0);
+                    content.pack_start(&card, false, false, 0);
+                }
+            }
 
-        content.pack_start(&row, false, false, 0);
+            content.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
+
+            // Verfuegbare Modelle
+            let avail_title = Label::new(Some("VERFUEGBARE MODELLE"));
+            avail_title.style_context().add_class("section-title");
+            avail_title.set_halign(Align::Start);
+            content.pack_start(&avail_title, false, false, 0);
+
+            let running_names: Vec<&str> = info.running_models.iter().map(|m| m.name.as_str()).collect();
+            let idle: Vec<&str> = info.available_models.iter()
+                .filter(|n| !running_names.contains(&n.as_str()))
+                .map(|s| s.as_str())
+                .collect();
+
+            if idle.is_empty() && info.available_models.is_empty() {
+                let lbl = Label::new(Some("Keine Modelle installiert"));
+                lbl.style_context().add_class("muted");
+                content.pack_start(&lbl, false, false, 0);
+            } else if idle.is_empty() {
+                let lbl = Label::new(Some("Alle Modelle aktiv"));
+                lbl.style_context().add_class("green");
+                content.pack_start(&lbl, false, false, 0);
+            } else {
+                for name in &idle {
+                    let row = GtkBox::new(Orientation::Horizontal, 6);
+                    row.style_context().add_class("model-card");
+                    let dot = Label::new(Some("\u{25CB}"));
+                    dot.style_context().add_class("muted");
+                    row.pack_start(&dot, false, false, 0);
+                    let lbl = Label::new(Some(name));
+                    lbl.style_context().add_class("svc-detail");
+                    lbl.set_halign(Align::Start);
+                    row.pack_start(&lbl, true, true, 0);
+                    content.pack_start(&row, false, false, 0);
+                }
+            }
+
+            // Zusammenfassung
+            content.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
+            let summary = format!(
+                "{} laufend, {} installiert",
+                info.running_models.len(),
+                info.available_models.len()
+            );
+            let summary_lbl = Label::new(Some(&summary));
+            summary_lbl.style_context().add_class("muted");
+            content.pack_start(&summary_lbl, false, false, 0);
+        }
+        None => {
+            let lbl = Label::new(Some("Ollama nicht erreichbar"));
+            lbl.style_context().add_class("muted");
+            lbl.set_margin_top(20);
+            content.pack_start(&lbl, false, false, 0);
+        }
     }
-
-    if all_ok {
-        let ready = Label::new(Some("\u{2705} USB-Paket bereit!"));
-        ready.style_context().add_class("green");
-        ready.set_margin_top(8);
-        content.pack_start(&ready, false, false, 0);
-    }
-
-    content.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
-
-    // Action buttons
-    let actions_title = Label::new(Some("AKTIONEN"));
-    actions_title.style_context().add_class("section-title");
-    actions_title.set_halign(Align::Start);
-    content.pack_start(&actions_title, false, false, 0);
-
-    let btn_row1 = GtkBox::new(Orientation::Horizontal, 8);
-
-    let btn_secrets = Button::with_label("\u{1F511} Secrets-Wizard");
-    btn_secrets.style_context().add_class("action-btn");
-    let sd1 = config.setup_dir.clone();
-    btn_secrets.connect_clicked(move |_| {
-        spawn_terminal(&format!("bash '{}/prepare-secrets.sh'", sd1));
-    });
-    btn_row1.pack_start(&btn_secrets, true, true, 0);
-
-    let btn_usb = Button::with_label("\u{1F4BE} USB-Paket bauen");
-    btn_usb.style_context().add_class("action-btn-blue");
-    let sd2 = config.setup_dir.clone();
-    btn_usb.connect_clicked(move |_| {
-        spawn_terminal(&format!("bash '{}/prepare-usb.sh'", sd2));
-    });
-    btn_row1.pack_start(&btn_usb, true, true, 0);
-
-    content.pack_start(&btn_row1, false, false, 0);
-
-    // Info
-    let info = Label::new(Some("Buttons oeffnen ein Terminal-Fenster fuer die jeweilige Aktion."));
-    info.style_context().add_class("muted");
-    info.set_margin_top(8);
-    info.set_line_wrap(true);
-    content.pack_start(&info, false, false, 0);
 
     let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     scroll.add(&content);
@@ -511,8 +605,57 @@ fn build_tab_config() -> ScrolledWindow {
     title.set_halign(Align::Start);
     content.pack_start(&title, false, false, 0);
 
-    // IP
-    let (ip_entry, _) = add_config_row(&content, "EVO-X2 IP (LAN)", &config.evo_ip, "192.168.x.x");
+    // LAN IP
+    let (ip_entry, _) = add_config_row(&content, "LAN IP", &config.evo_ip, "192.168.x.x");
+
+    // Tailscale IP
+    let (ts_entry, _) = add_config_row(&content, "Tailscale IP", &config.tailscale_ip, "100.x.x.x");
+
+    // Netzwerk-Modus (LAN / Tailscale)
+    let mode_label = Label::new(Some("Netzwerk-Modus"));
+    mode_label.style_context().add_class("config-label");
+    mode_label.set_halign(Align::Start);
+    content.pack_start(&mode_label, false, false, 0);
+
+    let mode_box = GtkBox::new(Orientation::Horizontal, 4);
+    let btn_lan = Button::with_label("LAN");
+    let btn_ts = Button::with_label("Tailscale");
+
+    if config.network_mode == "tailscale" {
+        btn_ts.style_context().add_class("badge-mode-active");
+        btn_lan.style_context().add_class("badge-mode-inactive");
+    } else {
+        btn_lan.style_context().add_class("badge-mode-active");
+        btn_ts.style_context().add_class("badge-mode-inactive");
+    }
+
+    let mode_state: Rc<Cell<bool>> = Rc::new(Cell::new(config.network_mode == "tailscale"));
+
+    let ms1 = Rc::clone(&mode_state);
+    let bl1 = btn_lan.clone();
+    let bt1 = btn_ts.clone();
+    btn_lan.connect_clicked(move |_| {
+        ms1.set(false);
+        bl1.style_context().remove_class("badge-mode-inactive");
+        bl1.style_context().add_class("badge-mode-active");
+        bt1.style_context().remove_class("badge-mode-active");
+        bt1.style_context().add_class("badge-mode-inactive");
+    });
+
+    let ms2 = Rc::clone(&mode_state);
+    let bl2 = btn_lan.clone();
+    let bt2 = btn_ts.clone();
+    btn_ts.connect_clicked(move |_| {
+        ms2.set(true);
+        bt2.style_context().remove_class("badge-mode-inactive");
+        bt2.style_context().add_class("badge-mode-active");
+        bl2.style_context().remove_class("badge-mode-active");
+        bl2.style_context().add_class("badge-mode-inactive");
+    });
+
+    mode_box.pack_start(&btn_lan, true, true, 0);
+    mode_box.pack_start(&btn_ts, true, true, 0);
+    content.pack_start(&mode_box, false, false, 0);
 
     // SSH User
     let (user_entry, _) = add_config_row(&content, "SSH Benutzer", &config.ssh_user, "jan");
@@ -528,7 +671,7 @@ fn build_tab_config() -> ScrolledWindow {
     content.pack_start(&gh_title, false, false, 0);
 
     // GitHub URL
-    let (gh_entry, _) = add_config_row(&content, "GitHub Repo URL", &config.github_url, "https://github.com/user/evo-x2-config");
+    let (gh_entry, _) = add_config_row(&content, "GitHub Repo URL", &config.github_url, "https://github.com/user/repo");
 
     // Setup Dir
     let (setup_entry, _) = add_config_row(&content, "Setup-Verzeichnis", &config.setup_dir, "~/Projekte/evo/setup");
@@ -545,23 +688,24 @@ fn build_tab_config() -> ScrolledWindow {
 
     let status_clone = status_label.clone();
     save_btn.connect_clicked(move |_| {
-        // Validierung
         let ip_text = ip_entry.text().to_string().trim().to_string();
+        let ts_text = ts_entry.text().to_string().trim().to_string();
         let port_text = port_entry.text().to_string().trim().to_string();
         let user_text = user_entry.text().to_string().trim().to_string();
 
-        // IP-Validierung: leer (erlaubt) oder gueltige IPv4
-        if !ip_text.is_empty() {
-            let parts: Vec<&str> = ip_text.split('.').collect();
-            let valid_ipv4 = parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok());
-            let valid_hostname = ip_text.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
-            if !valid_ipv4 && !valid_hostname {
-                status_clone.set_text("\u{274C} Ungueltige IP-Adresse!");
-                return;
+        // IP-Validierung
+        for (label, val) in &[("LAN-IP", &ip_text), ("Tailscale-IP", &ts_text)] {
+            if !val.is_empty() {
+                let parts: Vec<&str> = val.split('.').collect();
+                let valid_ipv4 = parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok());
+                let valid_hostname = val.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-');
+                if !valid_ipv4 && !valid_hostname {
+                    status_clone.set_text(&format!("\u{274C} Ungueltige {label}!"));
+                    return;
+                }
             }
         }
 
-        // Port-Validierung
         let port: u16 = match port_text.parse() {
             Ok(p) if p > 0 => p,
             _ => {
@@ -570,7 +714,6 @@ fn build_tab_config() -> ScrolledWindow {
             }
         };
 
-        // SSH-User darf nicht leer sein
         if user_text.is_empty() {
             status_clone.set_text("\u{274C} SSH-Benutzer darf nicht leer sein!");
             return;
@@ -578,6 +721,8 @@ fn build_tab_config() -> ScrolledWindow {
 
         let new_config = EvoConfig {
             evo_ip: ip_text,
+            tailscale_ip: ts_text,
+            network_mode: if mode_state.get() { "tailscale".into() } else { "lan".into() },
             ssh_user: user_text,
             metrics_port: port,
             github_url: gh_entry.text().to_string().trim().to_string(),
@@ -594,7 +739,6 @@ fn build_tab_config() -> ScrolledWindow {
     btn_box.pack_start(&status_label, false, false, 0);
     content.pack_start(&btn_box, false, false, 0);
 
-    // Config path info
     let path_info = Label::new(Some(&format!("Config: {}", EvoConfig::config_path().display())));
     path_info.style_context().add_class("muted");
     path_info.set_margin_top(8);
@@ -646,27 +790,8 @@ fn build_resource_bar(name: &str, used: f64, total: f64, unit: &str, pct: f64) -
     val.set_halign(Align::End); val.set_hexpand(true);
     header.pack_start(&val, true, true, 0);
     card.pack_start(&header, false, false, 0);
-    let bar = LevelBar::for_interval(0.0, 1.0); bar.set_value(pct); bar.set_margin_top(2);
+    let bar = LevelBar::for_interval(0.0, 1.0); bar.set_value(pct.clamp(0.0, 1.0)); bar.set_margin_top(2);
     card.pack_start(&bar, false, false, 0);
     card
 }
 
-fn spawn_terminal(cmd: &str) {
-    let full_cmd = format!("{cmd}; echo; echo 'Druecke Enter zum Schliessen...'; read");
-    // Try common terminal emulators
-    for terminal in &["gnome-terminal", "xfce4-terminal", "konsole", "xterm"] {
-        let args = match *terminal {
-            "gnome-terminal" => vec!["--".to_string(), "bash".into(), "-lc".into(), full_cmd.clone()],
-            "konsole" => vec!["-e".to_string(), "bash".into(), "-lc".into(), full_cmd.clone()],
-            _ => vec!["-e".to_string(), format!("bash -lc '{}'", full_cmd.replace('\'', "'\\''"))],
-        };
-        if std::process::Command::new(terminal)
-            .args(&args)
-            .spawn()
-            .is_ok()
-        {
-            return;
-        }
-    }
-    eprintln!("Kein Terminal-Emulator gefunden!");
-}
