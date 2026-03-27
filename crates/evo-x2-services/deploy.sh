@@ -37,7 +37,7 @@ scp -o ConnectTimeout=5 "$BIN" "$EVO_USER@$EVO_IP:~/.local/bin/evo-x2-services"
 
 echo "Restarte Services..."
 ssh -o ConnectTimeout=5 "$EVO_USER@$EVO_IP" \
-    "sudo systemctl restart evo-metrics webhook llama-ocr"
+    "sudo systemctl restart evo-metrics evo-webhook"
 
 echo "Health-Checks..."
 for port in 8084 9000 8083; do
