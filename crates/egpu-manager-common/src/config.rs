@@ -465,6 +465,15 @@ pub struct RecoveryConfig {
     /// Default: true
     #[serde(default = "default_true")]
     pub auto_detach_display: bool,
+    /// Automatisch nvidia-Treiber rebinden wenn eGPU auf PCI-Bus sichtbar
+    /// aber Treiber nicht gebunden ist (häufigstes Thunderbolt-Timing-Problem).
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub auto_rebind_driver: bool,
+    /// Maximale Rebind-Versuche pro Daemon-Laufzeit bevor aufgegeben wird.
+    /// Default: 3
+    #[serde(default = "default_3_u32")]
+    pub max_rebind_attempts: u32,
 }
 
 impl Default for RecoveryConfig {
@@ -475,6 +484,8 @@ impl Default for RecoveryConfig {
             scheduling_lock_timeout_seconds: default_5(),
             override_dir: default_override_dir(),
             auto_detach_display: true,
+            auto_rebind_driver: true,
+            max_rebind_attempts: default_3_u32(),
         }
     }
 }

@@ -234,9 +234,9 @@ default_provider = "ollama-evo-x2"
 [[llm_gateway.providers]]
 name = "ollama-evo-x2"
 provider_type = "openai_compatible"
-base_url = "http://TAILSCALE_IP:11434"   # TODO: Tailscale-IP nach EVO-X2 Setup eintragen
+base_url = "http://192.168.178.72:11434"  # EVO-X2 LAN-IP (Tailscale-IP nach VPN-Setup eintragen)
 api_key_ref = ""
-models = ["qwen3:72b", "dolphin3:72b", "bge-m3", "bge-reranker-v2-m3"]
+models = ["qwen2.5:72b-instruct-q4_K_M", "mannix/dolphin-2.9.2-qwen2-72b:q4_k_m", "bge-m3", "qllama/bge-reranker-v2-m3"]
 enabled = true
 priority = 0
 request_timeout_seconds = 300            # 5 Min — Dolphin-72B Cold-Start auf 120 GB GTT
@@ -267,37 +267,37 @@ priority = 2
 app_id = "audit_designer"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen3:72b", embeddings = "bge-m3", reranking = "bge-reranker-v2-m3" }
+workload_model_map = { llm = "qwen2.5:72b-instruct-q4_K_M", embeddings = "bge-m3", reranking = "qllama/bge-reranker-v2-m3" }
 
 [[llm_gateway.app_routing]]
 app_id = "flowinvoice"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen3:72b", ocr = "qwen3:14b" }
+workload_model_map = { llm = "qwen2.5:72b-instruct-q4_K_M", ocr = "qwen3:14b" }
 
 [[llm_gateway.app_routing]]
 app_id = "flowstat"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen3:72b" }
+workload_model_map = { llm = "qwen2.5:72b-instruct-q4_K_M" }
 
 [[llm_gateway.app_routing]]
 app_id = "riskanalysis"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen3:72b", embeddings = "bge-m3" }
+workload_model_map = { llm = "qwen2.5:72b-instruct-q4_K_M", embeddings = "bge-m3" }
 
 [[llm_gateway.app_routing]]
 app_id = "love-ai"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2"]
-workload_model_map = { llm = "dolphin3:72b", embeddings = "bge-m3" }
+workload_model_map = { llm = "mannix/dolphin-2.9.2-qwen2-72b:q4_k_m", embeddings = "bge-m3" }
 
 # --- Remote GPUs ---
 
 [[remote_gpu]]
 name = "evo-x2"
-host = "TAILSCALE_IP"                    # TODO: Tailscale-IP nach Setup eintragen
+host = "192.168.178.72"                  # EVO-X2 LAN-IP (Tailscale-IP nach VPN-Setup eintragen)
 port_ollama = 11434
 port_llama_cpp = 8080
 port_egpu_agent = 8899

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use egpu_manager_common::config::{Config, PipelineConfig, RemoteGpuConfig};
@@ -570,6 +571,10 @@ impl MonitorOrchestrator {
         // um Einzel-Sprünge beim Laststart zu glätten
         let mut temp_history: VecDeque<(u32, std::time::Instant)> = VecDeque::with_capacity(12);
 
+        // Auto-Rebind Tracking: Zählt fehlgeschlagene Versuche um Endlosschleifen zu vermeiden
+        let mut rebind_attempts: u32 = 0;
+        let mut last_rebind_attempt: Option<std::time::Instant> = None;
+
         // Build Ollama control for auto-unloading (Legacy single-instance)
         let ollama_ctl = config.ollama.as_ref().and_then(|cfg| {
             if cfg.enabled {
@@ -674,7 +679,113 @@ impl MonitorOrchestrator {
                             }
 
                             // M5: Track eGPU availability for scheduler
-                            let egpu_visible = gpus.iter().any(|g| g.pci_address == config.gpu.egpu_pci_address);
+                            let mut egpu_visible = gpus.iter().any(|g| g.pci_address == config.gpu.egpu_pci_address);
+
+                            // === Auto-Rebind: eGPU auf PCI-Bus aber nicht in NVML ===
+                            if !egpu_visible
+                                && config.recovery.auto_rebind_driver
+                                && rebind_attempts < config.recovery.max_rebind_attempts
+                                && crate::driver_rebind::needs_rebind(&config.gpu.egpu_pci_address)
+                            {
+                                // Cooldown: mindestens 10s zwischen Rebind-Versuchen
+                                let should_try = last_rebind_attempt
+                                    .map(|t| t.elapsed() > Duration::from_secs(10))
+                                    .unwrap_or(true);
+
+                                if should_try {
+                                    rebind_attempts += 1;
+                                    last_rebind_attempt = Some(std::time::Instant::now());
+
+                                    info!(
+                                        "Auto-Rebind Versuch {}/{}: eGPU {} auf PCI-Bus aber nvidia-Treiber nicht gebunden",
+                                        rebind_attempts, config.recovery.max_rebind_attempts,
+                                        config.gpu.egpu_pci_address
+                                    );
+
+                                    let result = crate::driver_rebind::try_rebind_nvidia(
+                                        &config.gpu.egpu_pci_address,
+                                    ).await;
+
+                                    match &result {
+                                        crate::driver_rebind::RebindResult::Bound => {
+                                            info!("nvidia-Treiber erfolgreich gebunden — erzwinge NVML Re-Init");
+                                            // NVML muss die neue GPU sehen → Re-Init + erneuter Query
+                                            gpu_monitor = GpuMonitorBackend::new(
+                                                config.gpu.nvidia_smi_timeout_seconds,
+                                            );
+                                            if let Ok(mut new_gpus) = gpu_monitor.query_all().await {
+                                                for gpu in &mut new_gpus {
+                                                    if gpu.pci_address == config.gpu.egpu_pci_address {
+                                                        gpu.gpu_type = GpuType::Egpu;
+                                                    } else if gpu.pci_address == config.gpu.internal_pci_address {
+                                                        gpu.gpu_type = GpuType::Internal;
+                                                    }
+                                                }
+                                                egpu_visible = new_gpus.iter().any(|g| {
+                                                    g.pci_address == config.gpu.egpu_pci_address
+                                                });
+                                                gpus = new_gpus;
+                                                if egpu_visible {
+                                                    info!("eGPU nach Rebind in NVML sichtbar — zurück im Normalbetrieb");
+                                                    rebind_attempts = 0; // Reset bei Erfolg
+                                                    db.log_event(
+                                                        "auto_rebind",
+                                                        Severity::Info,
+                                                        "nvidia-Treiber automatisch rebunden",
+                                                        None,
+                                                    ).await.ok();
+                                                }
+                                            }
+                                        }
+                                        crate::driver_rebind::RebindResult::GhostRemoved => {
+                                            warn!("Ghost-Device entfernt + PCI-Rescan — prüfe im nächsten Poll-Zyklus");
+                                            db.log_event(
+                                                "auto_rebind",
+                                                Severity::Warning,
+                                                "Ghost-Device (0xFF) entfernt, PCI-Rescan getriggert",
+                                                None,
+                                            ).await.ok();
+                                        }
+                                        crate::driver_rebind::RebindResult::RescanTriggered => {
+                                            warn!("PCI-Rescan getriggert — prüfe im nächsten Poll-Zyklus");
+                                            db.log_event(
+                                                "auto_rebind",
+                                                Severity::Warning,
+                                                "PCI-Rescan getriggert, nvidia bind fehlgeschlagen",
+                                                None,
+                                            ).await.ok();
+                                        }
+                                        crate::driver_rebind::RebindResult::Failed(reason) => {
+                                            error!("Auto-Rebind fehlgeschlagen: {reason}");
+                                            db.log_event(
+                                                "auto_rebind",
+                                                Severity::Error,
+                                                &format!("Rebind fehlgeschlagen: {reason}"),
+                                                None,
+                                            ).await.ok();
+                                        }
+                                        _ => {}
+                                    }
+
+                                    if rebind_attempts >= config.recovery.max_rebind_attempts && !egpu_visible {
+                                        error!(
+                                            "Auto-Rebind: {} Versuche erschöpft — eGPU bleibt offline. Manueller Eingriff nötig.",
+                                            config.recovery.max_rebind_attempts
+                                        );
+                                        db.log_event(
+                                            "auto_rebind",
+                                            Severity::Error,
+                                            &format!("Max Rebind-Versuche ({}) erschöpft", config.recovery.max_rebind_attempts),
+                                            None,
+                                        ).await.ok();
+                                    }
+                                }
+                            }
+                            // Reset Rebind-Zähler wenn eGPU wieder da
+                            if egpu_visible && rebind_attempts > 0 {
+                                rebind_attempts = 0;
+                                last_rebind_attempt = None;
+                            }
 
                             // eGPU-specific proactive checks (no lock needed — local analysis)
                             if let Some(egpu_status) = gpus.iter().find(|g| g.pci_address == config.gpu.egpu_pci_address) {

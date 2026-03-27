@@ -470,7 +470,7 @@ fn build_tab_setup() -> ScrolledWindow {
     btn_secrets.style_context().add_class("action-btn");
     let sd1 = config.setup_dir.clone();
     btn_secrets.connect_clicked(move |_| {
-        spawn_terminal(&format!("cd '{}' && bash prepare-secrets.sh", sd1));
+        spawn_terminal(&format!("bash '{}/prepare-secrets.sh'", sd1));
     });
     btn_row1.pack_start(&btn_secrets, true, true, 0);
 
@@ -478,7 +478,7 @@ fn build_tab_setup() -> ScrolledWindow {
     btn_usb.style_context().add_class("action-btn-blue");
     let sd2 = config.setup_dir.clone();
     btn_usb.connect_clicked(move |_| {
-        spawn_terminal(&format!("cd '{}' && bash prepare-usb.sh", sd2));
+        spawn_terminal(&format!("bash '{}/prepare-usb.sh'", sd2));
     });
     btn_row1.pack_start(&btn_usb, true, true, 0);
 
@@ -656,9 +656,9 @@ fn spawn_terminal(cmd: &str) {
     // Try common terminal emulators
     for terminal in &["gnome-terminal", "xfce4-terminal", "konsole", "xterm"] {
         let args = match *terminal {
-            "gnome-terminal" => vec!["--".to_string(), "bash".into(), "-c".into(), full_cmd.clone()],
-            "konsole" => vec!["-e".to_string(), "bash".into(), "-c".into(), full_cmd.clone()],
-            _ => vec!["-e".to_string(), format!("bash -c '{}'", full_cmd.replace('\'', "'\\''"))],
+            "gnome-terminal" => vec!["--".to_string(), "bash".into(), "-lc".into(), full_cmd.clone()],
+            "konsole" => vec!["-e".to_string(), "bash".into(), "-lc".into(), full_cmd.clone()],
+            _ => vec!["-e".to_string(), format!("bash -lc '{}'", full_cmd.replace('\'', "'\\''"))],
         };
         if std::process::Command::new(terminal)
             .args(&args)

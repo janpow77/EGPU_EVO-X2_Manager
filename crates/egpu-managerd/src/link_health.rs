@@ -17,6 +17,8 @@ const TB_EXPECTED_SPEED: &str = "2.5 GT/s";
 pub struct LinkHealthWatcher {
     pci_address: String,
     poll_interval: Duration,
+    /// Zählt aufeinanderfolgende Link-DOWN Meldungen für Rate-Limiting.
+    consecutive_down: u32,
 }
 
 impl LinkHealthWatcher {
@@ -24,20 +26,44 @@ impl LinkHealthWatcher {
         Self {
             pci_address,
             poll_interval: Duration::from_millis(poll_interval_ms),
+            consecutive_down: 0,
         }
     }
 
     /// Evaluate a single link health reading and return applicable triggers.
-    pub fn evaluate(health: &PcieLinkHealth) -> Vec<WarningTrigger> {
+    /// `consecutive_down` steuert das Rate-Limiting: erste Meldung sofort,
+    /// dann bei 10, 60, 300 und danach alle 600 Polls (ca. 5 Minuten bei 500ms).
+    pub fn evaluate_with_ratelimit(&mut self, health: &PcieLinkHealth) -> Vec<WarningTrigger> {
         let mut triggers = Vec::new();
 
         if health.is_link_down() {
-            warn!(
-                "PCIe-Link DOWN für {}: speed={}, width={}",
-                health.pci_address, health.current_link_speed, health.current_link_width
-            );
+            self.consecutive_down += 1;
+            let should_log = match self.consecutive_down {
+                1 => true,       // Erste DOWN-Meldung sofort
+                10 => true,      // Nach 5s
+                60 => true,      // Nach 30s
+                300 => true,     // Nach 2.5min
+                n if n % 600 == 0 => true, // Danach alle ~5min
+                _ => false,
+            };
+            if should_log {
+                warn!(
+                    "PCIe-Link DOWN für {} (seit {} Polls): speed={}, width={}",
+                    health.pci_address, self.consecutive_down,
+                    health.current_link_speed, health.current_link_width
+                );
+            }
             triggers.push(WarningTrigger::LinkDown);
             return triggers;
+        }
+
+        // Link ist wieder UP — Reset
+        if self.consecutive_down > 0 {
+            info!(
+                "PCIe-Link wieder UP für {} (war {} Polls down)",
+                health.pci_address, self.consecutive_down
+            );
+            self.consecutive_down = 0;
         }
 
         // Check width degradation against Thunderbolt expectation
@@ -72,9 +98,17 @@ impl LinkHealthWatcher {
         triggers
     }
 
+    /// Statische Evaluate-Methode für Tests (ohne Rate-Limiting).
+    #[cfg(test)]
+    pub fn evaluate(health: &PcieLinkHealth) -> Vec<WarningTrigger> {
+        let mut dummy = LinkHealthWatcher::new("test".to_string(), 500);
+        // Immer erste Meldung → wird geloggt
+        dummy.evaluate_with_ratelimit(health)
+    }
+
     /// Run the link health monitoring loop until cancelled.
     pub async fn run(
-        self,
+        mut self,
         monitor: Arc<dyn PcieLinkMonitor>,
         trigger_tx: mpsc::Sender<WarningTrigger>,
         cancel: CancellationToken,
@@ -93,7 +127,7 @@ impl LinkHealthWatcher {
                 _ = tokio::time::sleep(self.poll_interval) => {
                     match monitor.read_link_health(&self.pci_address).await {
                         Ok(health) => {
-                            let triggers = Self::evaluate(&health);
+                            let triggers = self.evaluate_with_ratelimit(&health);
                             if triggers.is_empty() {
                                 debug!(
                                     "Link-Health OK: {} x{} für {}",

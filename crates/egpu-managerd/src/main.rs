@@ -1,6 +1,7 @@
 mod aer;
 mod db;
 mod docker;
+mod driver_rebind;
 mod health_score;
 mod kmsg;
 mod link_health;
