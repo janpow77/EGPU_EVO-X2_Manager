@@ -106,6 +106,17 @@ phase_base() {
     info "Installiere Grundpakete ..."
     evo_tty "sudo apt install -y build-essential curl git wget htop tmux net-tools jq unzip software-properties-common linux-firmware"
 
+    # HWE-Kernel für Strix Halo (RDNA 3.5) — Kernel 6.8 hat keinen Support (Fatal GPU init error)
+    local current_kernel
+    current_kernel=$(evo "uname -r")
+    if [[ "$current_kernel" == 6.8.* ]]; then
+        info "Kernel $current_kernel zu alt für Strix Halo — installiere HWE-Kernel ..."
+        evo_tty "sudo apt install -y linux-generic-hwe-24.04"
+        warn "HWE-Kernel installiert — REBOOT NÖTIG: ssh $EVO_HOST 'sudo reboot'"
+    else
+        ok "Kernel $current_kernel — Strix Halo Support vorhanden"
+    fi
+
     info "Erstelle Verzeichnisse ..."
     evo "mkdir -p ~/.local/bin ~/.config/evo-x2"
 

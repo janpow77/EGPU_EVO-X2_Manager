@@ -118,21 +118,40 @@ test_system() {
         warn "RAM: nur ${total_gb} GB"
     fi
 
-    # GTT (AMD GPU-Speicher)
+    # Kernel-Version (Strix Halo braucht ≥6.15)
+    local kernel
+    kernel=$(evo "uname -r")
+    local kernel_major
+    kernel_major=$(echo "$kernel" | cut -d. -f1-2)
+    if awk "BEGIN{exit !($kernel_major >= 6.15)}"; then
+        pass "Kernel $kernel (≥6.15, Strix Halo Support)"
+    else
+        fail "Kernel $kernel — zu alt für Strix Halo (braucht ≥6.15). HWE-Kernel installieren: sudo apt install linux-generic-hwe-24.04"
+    fi
+
+    # amdgpu Treiber geladen UND gebunden?
+    if evo "lsmod | grep -q amdgpu"; then
+        pass "amdgpu-Kernelmodul geladen"
+    else
+        fail "amdgpu-Kernelmodul nicht geladen"
+    fi
+
+    local gpu_driver
+    gpu_driver=$(evo "lspci -s c5:00.0 -k 2>/dev/null | grep 'Kernel driver in use' | awk '{print \$NF}'" || echo "")
+    if [[ "$gpu_driver" == "amdgpu" ]]; then
+        pass "amdgpu-Treiber an GPU gebunden"
+    else
+        fail "amdgpu-Treiber NICHT an GPU gebunden (driver: '${gpu_driver:-none}') — Kernel zu alt oder Firmware fehlt"
+    fi
+
+    # GTT (AMD GPU-Speicher) — verschiedene sysfs-Pfade prüfen
     local gtt_bytes
-    gtt_bytes=$(evo "cat /sys/class/drm/card*/device/mem_info_gtt_total 2>/dev/null | head -1" || echo "0")
+    gtt_bytes=$(evo "find /sys/class/drm/*/device -name mem_info_gtt_total -exec cat {} \; 2>/dev/null | head -1" || echo "0")
     if [[ -n "$gtt_bytes" && "$gtt_bytes" != "0" ]]; then
         local gtt_gb=$((gtt_bytes / 1024 / 1024 / 1024))
         pass "GTT: ${gtt_gb} GB"
     else
-        warn "GTT nicht gefunden — amdgpu-Treiber geladen?"
-    fi
-
-    # amdgpu Treiber
-    if evo "lsmod | grep -q amdgpu"; then
-        pass "amdgpu-Treiber geladen"
-    else
-        warn "amdgpu-Treiber nicht geladen"
+        fail "GTT nicht verfügbar — amdgpu nicht korrekt gebunden"
     fi
 }
 

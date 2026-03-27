@@ -98,12 +98,9 @@ async fn handle_metrics(State(state): State<AppState>) -> Json<MetricsResponse> 
 }
 
 fn read_gtt() -> GttInfo {
-    let used = read_sysfs_u64("/sys/class/drm/card0/device/mem_info_gtt_used")
-        .or_else(|| read_sysfs_u64("/sys/class/drm/card1/device/mem_info_gtt_used"))
-        .unwrap_or(0);
-    let total = read_sysfs_u64("/sys/class/drm/card0/device/mem_info_gtt_total")
-        .or_else(|| read_sysfs_u64("/sys/class/drm/card1/device/mem_info_gtt_total"))
-        .unwrap_or(0);
+    // Dynamisch alle DRM-Karten durchsuchen (card0, card1, card2, ...)
+    // da der Strix Halo je nach Kernel-Version unterschiedliche card-Nummern bekommt
+    let (used, total) = find_gtt_sysfs();
 
     GttInfo {
         used_bytes: used,
@@ -111,6 +108,25 @@ fn read_gtt() -> GttInfo {
         used_gb: used as f64 / 1024.0_f64.powi(3),
         total_gb: total as f64 / 1024.0_f64.powi(3),
     }
+}
+
+fn find_gtt_sysfs() -> (u64, u64) {
+    let drm_dir = std::path::Path::new("/sys/class/drm");
+    if let Ok(entries) = std::fs::read_dir(drm_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let total_path = path.join("device/mem_info_gtt_total");
+            if total_path.exists() {
+                let total = read_sysfs_u64(total_path.to_str().unwrap_or_default()).unwrap_or(0);
+                if total > 0 {
+                    let used_path = path.join("device/mem_info_gtt_used");
+                    let used = read_sysfs_u64(used_path.to_str().unwrap_or_default()).unwrap_or(0);
+                    return (used, total);
+                }
+            }
+        }
+    }
+    (0, 0)
 }
 
 fn read_memory() -> MemInfo {
