@@ -407,13 +407,13 @@ test_loveai_config() {
         fail "OLLAMA_URL zeigt NICHT auf EVO-X2: $ollama_url"
     fi
 
-    # Dolphin-Modell konfiguriert?
+    # Unzensiertes Modell konfiguriert?
     local chat_model
     chat_model=$(grep "^OLLAMA_CHAT_MODEL=" "$env_file" | cut -d= -f2- || echo "")
-    if echo "$chat_model" | grep -qi "dolphin"; then
-        pass "OLLAMA_CHAT_MODEL: $chat_model"
+    if echo "$chat_model" | grep -qiE "dolphin|abliterate|uncensored"; then
+        pass "OLLAMA_CHAT_MODEL (unzensiert): $chat_model"
     else
-        warn "OLLAMA_CHAT_MODEL ist nicht Dolphin: $chat_model"
+        warn "OLLAMA_CHAT_MODEL nicht als unzensiert erkannt: $chat_model"
     fi
 
     # Embedding-Modell?
