@@ -181,7 +181,7 @@ phase_ollama() {
     cat > "$TMPFILE" << 'OVERRIDE'
 [Service]
 Environment=OLLAMA_HOST=0.0.0.0
-Environment=OLLAMA_KEEP_ALIVE=5m
+Environment=OLLAMA_KEEP_ALIVE=-1
 OVERRIDE
     scp $SSH_OPTS "$TMPFILE" "$EVO_HOST:/tmp/ollama-override.conf"
     rm -f "$TMPFILE"
