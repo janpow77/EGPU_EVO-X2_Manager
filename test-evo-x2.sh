@@ -27,7 +27,7 @@ EXPECTED_MODELS=(
     "bge-m3"
     "qllama/bge-reranker-v2-m3"
     "qwen2.5:72b-instruct-q4_K_M"
-    "mannix/dolphin-2.9.2-qwen2-72b:q4_k_m"
+    "huihui_ai/qwen2.5-abliterate:32b-instruct"
 )
 
 # Farben
@@ -239,22 +239,35 @@ test_ollama_inference() {
         warn "Chat-Inferenz (qwen2.5:72b): Timeout oder Fehler — Cold-Start?"
     fi
 
-    # Dolphin-Test (nur wenn Modell vorhanden)
+    # Abliterate-32B Test (love-ai Modell, passt parallel mit 72B in GTT)
     local models_json
     models_json=$(curl -sf --connect-timeout 5 "http://$EVO_IP:11434/api/tags" 2>/dev/null || echo "")
-    if echo "$models_json" | grep -q "dolphin-2.9.2"; then
-        local dolphin_result
-        dolphin_result=$(curl -sf --connect-timeout 10 --max-time 120 \
+    if echo "$models_json" | grep -q "abliterate"; then
+        local abl_result
+        abl_result=$(curl -sf --connect-timeout 10 --max-time 60 \
             "http://$EVO_IP:11434/api/chat" \
-            -d '{"model":"mannix/dolphin-2.9.2-qwen2-72b:q4_k_m","messages":[{"role":"user","content":"Say OK"}],"stream":false,"options":{"num_predict":10}}' 2>/dev/null)
+            -d '{"model":"huihui_ai/qwen2.5-abliterate:32b-instruct","messages":[{"role":"user","content":"Say OK"}],"stream":false,"options":{"num_predict":10}}' 2>/dev/null)
 
-        if echo "$dolphin_result" | grep -q "message"; then
-            pass "Chat-Inferenz (dolphin-72b): OK"
+        if echo "$abl_result" | grep -q "message"; then
+            pass "Chat-Inferenz (abliterate-32b): OK"
         else
-            warn "Chat-Inferenz (dolphin-72b): Timeout — Cold-Start? (Qwen2.5 und Dolphin passen nicht gleichzeitig in GTT)"
+            warn "Chat-Inferenz (abliterate-32b): Timeout oder Fehler"
         fi
     else
-        skip "Dolphin-72b nicht installiert — übersprungen"
+        skip "abliterate-32b nicht installiert — übersprungen"
+    fi
+
+    # Parallel-Test: Prüfe ob beide Modelle gleichzeitig geladen sind
+    local running
+    running=$(curl -sf --connect-timeout 5 "http://$EVO_IP:11434/api/ps" 2>/dev/null || echo "")
+    local running_count
+    running_count=$(echo "$running" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('models',[])))" 2>/dev/null || echo "0")
+    if [[ "$running_count" -ge 2 ]]; then
+        pass "Parallel-Betrieb: $running_count Modelle gleichzeitig geladen"
+    elif [[ "$running_count" -eq 1 ]]; then
+        warn "Nur 1 Modell geladen (KEEP_ALIVE=-1 aktiv? Beide Modelle einmal anfragen)"
+    else
+        warn "Keine Modelle geladen"
     fi
 }
 
@@ -310,6 +323,25 @@ test_services() {
         fail "Metrics-Endpoint liefert keine CPU-Daten"
     fi
 
+    # Neue Metrics-Felder (Widget-Optimierung)
+    if echo "$metrics" | grep -q "ollama"; then
+        pass "Metrics-Endpoint liefert Ollama-Daten"
+    else
+        warn "Metrics-Endpoint ohne Ollama-Daten (alter Binary?)"
+    fi
+
+    if echo "$metrics" | grep -q "temperature_c"; then
+        pass "Metrics-Endpoint liefert GPU-Temperatur"
+    else
+        warn "Metrics-Endpoint ohne GPU-Temperatur"
+    fi
+
+    if echo "$metrics" | grep -q "tailscale"; then
+        pass "Metrics-Endpoint liefert Tailscale-Daten"
+    else
+        warn "Metrics-Endpoint ohne Tailscale-Daten"
+    fi
+
     # Webhook Service
     svc_status=$(evo "systemctl is-active evo-webhook 2>/dev/null || echo inactive")
     if [[ "$svc_status" == "active" ]]; then
@@ -345,7 +377,7 @@ test_widget_config() {
     fi
 
     # Widget-Prozess läuft?
-    if pgrep -x evo-manager-widget &>/dev/null; then
+    if pgrep -f evo-manager-widget &>/dev/null; then
         pass "evo-manager-widget Prozess läuft"
     else
         warn "evo-manager-widget Prozess nicht gestartet"
