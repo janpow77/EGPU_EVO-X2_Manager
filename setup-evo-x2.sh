@@ -211,9 +211,9 @@ phase_models() {
     info "[3/4] qwen2.5:72b — Haupt-LLM (~47 GB) ..."
     evo "ollama pull qwen2.5:72b-instruct-q4_K_M" && ok "qwen2.5:72b-instruct-q4_K_M" || fail "qwen2.5:72b-instruct-q4_K_M"
 
-    # ---- Dolphin-72B (love-ai, unzensiert, on-demand) ----
-    info "[4/4] dolphin-2.9.2-qwen2-72b — Unzensiertes RP-LLM (~47 GB) ..."
-    evo "ollama pull mannix/dolphin-2.9.2-qwen2-72b:q4_k_m" && ok "dolphin-72b" || fail "dolphin-72b"
+    # ---- Qwen2.5-32B abliterated (love-ai, unzensiert, parallel mit 72B) ----
+    info "[4/4] qwen2.5-abliterate:32b — Unzensiertes RP-LLM (~20 GB) ..."
+    evo "ollama pull huihui_ai/qwen2.5-abliterate:32b-instruct" && ok "qwen2.5-abliterate:32b" || fail "qwen2.5-abliterate:32b"
 
     echo ""
     info "Installierte Modelle:"
