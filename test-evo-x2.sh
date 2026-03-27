@@ -146,7 +146,7 @@ test_system() {
 
     # GTT (AMD GPU-Speicher) — verschiedene sysfs-Pfade prüfen
     local gtt_bytes
-    gtt_bytes=$(evo "find /sys/class/drm/*/device -name mem_info_gtt_total -exec cat {} \; 2>/dev/null | head -1" || echo "0")
+    gtt_bytes=$(evo "for f in /sys/class/drm/card*/device/mem_info_gtt_total; do cat \"\$f\" 2>/dev/null && break; done" || echo "0")
     if [[ -n "$gtt_bytes" && "$gtt_bytes" != "0" ]]; then
         local gtt_gb=$((gtt_bytes / 1024 / 1024 / 1024))
         pass "GTT: ${gtt_gb} GB"
