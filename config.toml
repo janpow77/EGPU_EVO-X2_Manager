@@ -234,7 +234,7 @@ default_provider = "ollama-evo-x2"
 [[llm_gateway.providers]]
 name = "ollama-evo-x2"
 provider_type = "openai_compatible"
-base_url = "http://192.168.178.72:11434"  # EVO-X2 LAN-IP (Tailscale-IP nach VPN-Setup eintragen)
+base_url = "http://100.81.4.99:11434"    # EVO-X2 Tailscale-IP (stabil, auch außerhalb LAN)
 api_key_ref = ""
 models = ["qwen2.5:72b-instruct-q4_K_M", "mannix/dolphin-2.9.2-qwen2-72b:q4_k_m", "bge-m3", "qllama/bge-reranker-v2-m3"]
 enabled = true
@@ -297,7 +297,7 @@ workload_model_map = { llm = "mannix/dolphin-2.9.2-qwen2-72b:q4_k_m", embeddings
 
 [[remote_gpu]]
 name = "evo-x2"
-host = "192.168.178.72"                  # EVO-X2 LAN-IP (Tailscale-IP nach VPN-Setup eintragen)
+host = "100.81.4.99"                     # EVO-X2 Tailscale-IP
 port_ollama = 11434
 port_llama_cpp = 8080
 port_egpu_agent = 8899
