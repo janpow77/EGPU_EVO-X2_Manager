@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 use super::budget::BudgetTracker;
-use super::provider::LlmProvider;
+use super::provider::{LlmProvider, SseByteStream};
 use super::providers::anthropic::AnthropicProvider;
 use super::providers::gemini::GeminiProvider;
 use super::providers::openai_compat::OpenAiCompatProvider;
@@ -162,17 +162,18 @@ impl LlmRouter {
         self.ollama_fleet = Some(fleet);
     }
 
-    /// Route a chat completion request.
-    /// Mit GPU-Aware Routing: Workload-Typ → Modell → Instanz → VRAM-Check → Preemption.
-    pub async fn chat_completion(
+    /// Gemeinsame Vorpruefungen fuer chat_completion und chat_completion_stream:
+    /// Modell-Aufloesung, Permissions, Budget, Provider-Auswahl, VRAM-Preemption, Rate-Limit.
+    async fn preflight(
         &self,
-        mut request: ChatCompletionRequest,
+        request: &mut ChatCompletionRequest,
         app_id: &str,
-    ) -> Result<ChatCompletionResponse, GatewayError> {
+    ) -> Result<Arc<dyn LlmProvider>, GatewayError> {
         request.app_id = Some(app_id.to_string());
 
         // GPU-Aware: Modell aus Workload-Typ auflösen
-        let (resolved_model, resolved_instance) = self.resolve_model_from_workload(&request, app_id);
+        let (resolved_model, resolved_instance) =
+            self.resolve_model_from_workload(request, app_id);
         if request.model != resolved_model {
             info!(
                 "GPU-Aware Routing: Modell '{}' -> '{}' (Workload: {:?}, App: {})",
@@ -218,13 +219,12 @@ impl LlmRouter {
         }
 
         // Find provider
-        let provider = self.select_provider(&request, app_id).await?;
+        let provider = self.select_provider(request, app_id).await?;
 
         // GPU-Aware: VRAM-Preemption falls nötig
         if let Some(ref inst_name) = resolved_instance {
             if let Some(ref fleet) = self.ollama_fleet {
                 if let Some(inst) = fleet.instance_by_name(inst_name) {
-                    // Prüfe ob genug VRAM verfügbar ist
                     if let Some(ref monitor) = self.monitor_state {
                         let (vram_available, inst_priority) = {
                             let st = monitor.lock().await;
@@ -234,32 +234,25 @@ impl LlmRouter {
                             )
                         };
 
-                        // Typischer VRAM-Bedarf aus workload_type Config
-                        let needed_vram = self.config.app_routing.iter()
-                            .find(|r| r.app_id == app_id)
-                            .and_then(|_| {
-                                request.workload_type.as_deref()
-                            })
-                            .and_then(|_wt| {
-                                // Konservativer Default: 2 GB für Embedding, 10 GB für LLM
-                                match request.workload_type.as_deref() {
-                                    Some("embeddings") => Some(2000u64),
-                                    Some("llm") => Some(10000u64),
-                                    _ => None,
-                                }
-                            })
-                            .unwrap_or(0);
+                        let needed_vram = match request.workload_type.as_deref() {
+                            Some("embeddings") => 2000u64,
+                            Some("llm") => 10000u64,
+                            _ => 0,
+                        };
 
                         if needed_vram > 0 && vram_available < needed_vram {
-                            let preempted = self.preempt_models_if_needed(
-                                inst.gpu_target,
-                                needed_vram,
-                                inst_priority,
-                            ).await;
+                            let preempted = self
+                                .preempt_models_if_needed(
+                                    inst.gpu_target,
+                                    needed_vram,
+                                    inst_priority,
+                                )
+                                .await;
                             if !preempted.is_empty() {
                                 info!(
                                     "Preemption vor Request: {} Modell(e) entladen auf {:?}",
-                                    preempted.len(), inst.gpu_target
+                                    preempted.len(),
+                                    inst.gpu_target
                                 );
                             }
                         }
@@ -282,6 +275,18 @@ impl LlmRouter {
                 return Err(GatewayError::rate_limited());
             }
         }
+
+        Ok(provider)
+    }
+
+    /// Route a chat completion request (nicht-streamend).
+    /// Mit GPU-Aware Routing: Workload-Typ → Modell → Instanz → VRAM-Check → Preemption.
+    pub async fn chat_completion(
+        &self,
+        mut request: ChatCompletionRequest,
+        app_id: &str,
+    ) -> Result<ChatCompletionResponse, GatewayError> {
+        let provider = self.preflight(&mut request, app_id).await?;
 
         // Execute request
         let start = Instant::now();
@@ -312,6 +317,28 @@ impl LlmRouter {
         }
 
         Ok(response)
+    }
+
+    /// Route a chat completion request (streamend, raw byte passthrough).
+    /// Gleiche Vorpruefungen wie chat_completion, aber gibt einen SSE-Byte-Stream zurueck.
+    /// Die Upstream-Bytes werden 1:1 durchgereicht — kein Parse/Re-serialize.
+    /// Token-Usage wird bei Streaming nicht getrackt.
+    /// Gibt (stream, provider_name) zurueck.
+    pub async fn chat_completion_stream(
+        &self,
+        mut request: ChatCompletionRequest,
+        app_id: &str,
+    ) -> Result<(SseByteStream, String), GatewayError> {
+        request.stream = true;
+        let provider = self.preflight(&mut request, app_id).await?;
+        let provider_name = provider.name().to_string();
+
+        let stream = provider
+            .chat_completion_stream(&request)
+            .await
+            .map_err(|e| GatewayError::new(e.to_string(), "provider_error"))?;
+
+        Ok((stream, provider_name))
     }
 
     /// GPU-Aware Modell-Auflösung: Bestimmt Modell und Provider aus App-Config + Workload-Typ.
@@ -469,6 +496,29 @@ impl LlmRouter {
         self.config.providers.iter().find(|p| p.name == name)
     }
 
+    /// Findet den besten Provider-Host fuer ein Embedding-Modell.
+    /// Durchsucht die konfigurierten LLM-Provider (openai_compatible) nach Prioritaet.
+    /// Wird als Fallback genutzt wenn kein lokaler Fleet-Instanz das Modell hat
+    /// (z.B. bge-m3 auf EVO X2 statt lokal).
+    fn find_embedding_provider_host(&self, model: &str) -> Result<String, GatewayError> {
+        let mut candidates: Vec<_> = self
+            .config
+            .providers
+            .iter()
+            .filter(|p| p.enabled && p.provider_type == "openai_compatible")
+            .filter(|p| p.models.is_empty() || p.models.iter().any(|m| m == model))
+            .collect();
+
+        candidates.sort_by_key(|p| p.priority);
+
+        candidates.first().map(|p| p.base_url.clone()).ok_or_else(|| {
+            GatewayError::new(
+                format!("Kein Provider fuer Embedding-Modell '{model}'"),
+                "routing_error",
+            )
+        })
+    }
+
     fn calculate_cost(&self, usage: &TokenUsage, provider_cfg: Option<&LlmProviderConfig>) -> f64 {
         let Some(cfg) = provider_cfg else {
             return 0.0;
@@ -498,27 +548,25 @@ impl LlmRouter {
             }
         }
 
-        // Ollama-Host finden: Fleet hat Vorrang
-        let ollama_host = if let Some(ref fleet) = self.ollama_fleet {
-            // Zuerst: Instanz die das Modell hat
-            if let Some(inst) = fleet.instance_for_model(&request.model) {
-                inst.config.host.clone()
+        // Ollama-Host finden: Fleet hat Vorrang, dann Provider-Fallback.
+        // Wichtig: Workload-Type-Match nur nutzen wenn die Instanz das Modell auch hat,
+        // sonst landet z.B. bge-m3 auf ollama-egpu (hat nur nomic-embed-text).
+        let ollama_host = 'host: {
+            if let Some(ref fleet) = self.ollama_fleet {
+                // 1. Fleet-Instanz die das Modell exakt hat
+                if let Some(inst) = fleet.instance_for_model(&request.model) {
+                    break 'host inst.config.host.clone();
+                }
+                // 2. Workload-Match, aber NUR wenn die Instanz das Modell auch fuehrt
+                //    (oder Modell noch "auto"/leer ist — dann nimmt die Instanz ihr Default-Modell)
+                if request.model == "auto" || request.model.is_empty() {
+                    if let Some(inst) = fleet.instances_for_workload(&workload_type).first() {
+                        break 'host inst.config.host.clone();
+                    }
+                }
             }
-            // Dann: Instanz für den Workload-Typ
-            else if let Some(inst) = fleet.instances_for_workload(&workload_type).first() {
-                inst.config.host.clone()
-            } else {
-                return Err(GatewayError::new(
-                    format!("Keine Ollama-Instanz für Modell '{}' / Workload '{}'", request.model, workload_type),
-                    "routing_error",
-                ));
-            }
-        } else {
-            // Legacy: erster Provider mit openai_compatible
-            self.config.providers.iter()
-                .find(|p| p.provider_type == "openai_compatible" && p.enabled)
-                .map(|p| p.base_url.clone())
-                .ok_or_else(GatewayError::no_provider)?
+            // 3. Kein Fleet-Match → LLM Gateway Provider der das Modell kennt (nach Prioritaet)
+            self.find_embedding_provider_host(&request.model)?
         };
 
         // Preemption falls nötig

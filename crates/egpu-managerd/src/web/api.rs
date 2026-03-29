@@ -2180,6 +2180,8 @@ pub async fn post_llm_embeddings(
 }
 
 /// POST /api/llm/chat/completions — OpenAI-kompatible Chat-Completion via LLM Gateway
+/// Bei stream=true: SSE-Response mit text/event-stream (echtes Streaming, kein Buffering)
+/// Bei stream=false: normale JSON-Response
 pub async fn post_llm_chat_completions(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -2198,33 +2200,72 @@ pub async fn post_llm_chat_completions(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
 
-    let start = std::time::Instant::now();
-    match router.chat_completion(request, app_id).await {
-        Ok(response) => {
-            // Gateway-Metriken erfassen
-            if let Some(ref m) = state.daemon_metrics {
-                let latency = start.elapsed().as_millis() as f64;
-                let tokens = response.usage.as_ref()
-                    .map(|u| (u.prompt_tokens + u.completion_tokens) as u64)
-                    .unwrap_or(0);
-                m.record_chat_request(app_id, latency, tokens);
+    if request.stream {
+        // --- Streaming-Pfad (raw byte passthrough) ---
+        // Upstream-SSE wird 1:1 durchgereicht — bewahrt alle Felder
+        // (reasoning_content, tool_calls, etc.) ohne Parse/Re-serialize.
+        match router.chat_completion_stream(request, app_id).await {
+            Ok((byte_stream, provider_name)) => {
+                use futures::StreamExt;
+
+                let body = axum::body::Body::from_stream(
+                    byte_stream.map(|r| {
+                        r.map_err(|e| std::io::Error::other(e.to_string()))
+                    }),
+                );
+                axum::http::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .header("cache-control", "no-cache")
+                    .header("x-accel-buffering", "no")
+                    .header("x-llm-provider", &provider_name)
+                    .body(body)
+                    .unwrap()
+                    .into_response()
             }
-            Json(serde_json::to_value(response).unwrap()).into_response()
-        }
-        Err(err) => {
-            // Gateway-Fehler-Metrik
-            if let Some(ref m) = state.daemon_metrics {
-                m.record_gateway_error(app_id, &err.error.r#type);
+            Err(err) => {
+                // Fehler VOR Stream-Start — als normales JSON zurueckgeben
+                if let Some(ref m) = state.daemon_metrics {
+                    m.record_gateway_error(app_id, &err.error.r#type);
+                }
+                let status = gateway_error_status(&err);
+                (status, Json(serde_json::to_value(err).unwrap())).into_response()
             }
-            let status = match err.error.r#type.as_str() {
-                "rate_limit_error" => StatusCode::TOO_MANY_REQUESTS,
-                "budget_exceeded" => StatusCode::PAYMENT_REQUIRED,
-                "permission_error" => StatusCode::FORBIDDEN,
-                "routing_error" => StatusCode::SERVICE_UNAVAILABLE,
-                _ => StatusCode::BAD_GATEWAY,
-            };
-            (status, Json(serde_json::to_value(err).unwrap())).into_response()
         }
+    } else {
+        // --- Non-Streaming-Pfad (unveraendert) ---
+        let start = std::time::Instant::now();
+        match router.chat_completion(request, app_id).await {
+            Ok(response) => {
+                if let Some(ref m) = state.daemon_metrics {
+                    let latency = start.elapsed().as_millis() as f64;
+                    let tokens = response
+                        .usage
+                        .as_ref()
+                        .map(|u| (u.prompt_tokens + u.completion_tokens) as u64)
+                        .unwrap_or(0);
+                    m.record_chat_request(app_id, latency, tokens);
+                }
+                Json(serde_json::to_value(response).unwrap()).into_response()
+            }
+            Err(err) => {
+                if let Some(ref m) = state.daemon_metrics {
+                    m.record_gateway_error(app_id, &err.error.r#type);
+                }
+                let status = gateway_error_status(&err);
+                (status, Json(serde_json::to_value(err).unwrap())).into_response()
+            }
+        }
+    }
+}
+
+/// Mappt GatewayError-Typ auf HTTP-StatusCode
+fn gateway_error_status(err: &crate::llm::types::GatewayError) -> StatusCode {
+    match err.error.r#type.as_str() {
+        "rate_limit_error" => StatusCode::TOO_MANY_REQUESTS,
+        "budget_exceeded" => StatusCode::PAYMENT_REQUIRED,
+        "permission_error" => StatusCode::FORBIDDEN,
+        "routing_error" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::BAD_GATEWAY,
     }
 }
 

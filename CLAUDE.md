@@ -295,3 +295,34 @@ scp target/release/evo-x2-services jan@EVO-X2:~/.local/bin/
 **Zusammenspiel:** Das Setup und die Bash-Scripts (llama-serve-*, llama-update.sh)
 liegen im separaten Repo `evo-x2-setup` (github.com/janpow77/evo-x2-setup).
 Die systemd-Units dort rufen `evo-x2-services` als Binary auf.
+
+## Embedding-Routing-Regel
+
+Wenn die EVO X2 online ist (erreichbar via Tailscale 100.81.4.99:11434), dann:
+
+1. **Alle Embedding-Workloads** (bge-m3) muessen ueber den LLM Gateway zur EVO X2 geroutet werden — NICHT lokal auf der NUC
+2. Die NUC-Container (audit_designer, flowinvoice) haben KEIN funktionierendes CUDA im Docker — nvidia-smi geht, aber torch.cuda.is_available() ist False
+3. Das Embedding-Modell ist BAAI/bge-m3 (1024 Dimensionen) — auf der EVO X2 als Ollama-Modell "bge-m3" geladen
+4. Der Gateway-Endpoint ist POST /api/llm/embeddings mit {"model": "bge-m3", "input": [...]} — Response ist Ollama-Format: {"embeddings": [[...]]}
+5. Consumer-Projekte setzen VP_AI_EMBEDDING_PROVIDER=ollama_gateway und EGPU_MANAGER_URL=http://host.docker.internal:7842
+
+### Fallback-Kaskade fuer Embeddings:
+1. EVO X2 via Gateway (bevorzugt, ~50 Chunks/s)
+2. Lokale GPU via SentenceTransformer (nur wenn CUDA im Container funktioniert)
+3. CPU-Fallback (langsam, ~2 Chunks/s, Notfall)
+
+### Bekannte Probleme:
+- audit_designer celery-worker hat DeviceRequests=nvidia aber NVML initialisiert nicht → CUDA=False
+- Der Embedding-Modellname in der DB ist "BAAI/bge-m3", der Gateway kennt es als "bge-m3" — beim Consistency-Check muessen beide als identisch behandelt werden
+- Die EVO X2 braucht ~3.4s fuer den ersten Embed-Request (Modell-Load), danach ~2s pro 100 Chunks
+
+## LLM Gateway Streaming
+
+Der Endpoint `POST /api/llm/chat/completions` unterstuetzt `stream: true` mit raw byte passthrough:
+
+- Bei `stream=false`: Normale JSON-Response (unveraendert)
+- Bei `stream=true`: `text/event-stream` — Upstream-SSE wird 1:1 durchgereicht
+- Kein Parse/Re-serialize: Alle Felder (reasoning_content, tool_calls etc.) werden bewahrt
+- Provider-Info im Header `X-LLM-Provider`
+- Nur der `openai_compatible`-Provider unterstuetzt Streaming (Ollama, xAI, DeepSeek etc.)
+- Anthropic/Gemini-Provider geben 501 zurueck wenn Streaming angefragt wird
