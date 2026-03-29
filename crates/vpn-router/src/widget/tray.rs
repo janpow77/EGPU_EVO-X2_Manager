@@ -127,7 +127,7 @@ pub fn update_tray(indicator: &mut AppIndicator, state: &VpnState) {
 
     let web_item = gtk::MenuItem::with_label("Dashboard oeffnen");
     web_item.connect_activate(|_| {
-        let _ = open::that("http://127.0.0.1:3000");
+        let _ = open::that("http://127.0.0.1:3080");
     });
     menu.append(&web_item);
 

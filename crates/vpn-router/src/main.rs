@@ -27,7 +27,7 @@ async fn main() {
 
     println!("VPN Travel Router Manager");
     println!("Router: {}", router_ip);
-    println!("Starting on http://0.0.0.0:3000");
+    println!("Starting on http://0.0.0.0:3080");
 
     let state = Arc::new(AppState {
         router_api: RouterApi::new(&router_ip),
@@ -60,12 +60,12 @@ async fn main() {
         .route("/api/setup/emergency-restore", post(api_emergency_restore))
         .route("/api/setup/init-password", post(api_init_password))
         .layer(CorsLayer::new()
-            .allow_origin(["http://localhost:3000".parse().unwrap(), "http://127.0.0.1:3000".parse().unwrap()])
+            .allow_origin(tower_http::cors::Any)
             .allow_methods(tower_http::cors::Any)
             .allow_headers(tower_http::cors::Any))
         .with_state(state);
 
-    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3080".to_string());
     println!("Listening on http://{}", bind_addr);
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await

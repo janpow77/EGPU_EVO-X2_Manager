@@ -15,7 +15,7 @@ fn main() {
     // Tray icon
     let indicator = tray::create_tray(
         || {
-            let _ = open::that("http://127.0.0.1:3000");
+            let _ = open::that("http://127.0.0.1:3080");
         },
         || {
             gtk::main_quit();
@@ -35,7 +35,7 @@ fn main() {
             let client = reqwest::Client::new();
             loop {
                 match client
-                    .get("http://127.0.0.1:3000/api/status")
+                    .get("http://127.0.0.1:3080/api/status")
                     .timeout(std::time::Duration::from_secs(5))
                     .send()
                     .await

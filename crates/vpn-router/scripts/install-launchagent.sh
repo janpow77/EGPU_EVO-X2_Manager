@@ -37,7 +37,7 @@ cat > "$PLIST" << EOF
         <key>ROUTER_IP</key>
         <string>192.168.8.1</string>
         <key>BIND_ADDR</key>
-        <string>127.0.0.1:3000</string>
+        <string>127.0.0.1:3080</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -58,4 +58,4 @@ echo "LaunchAgent installiert und gestartet."
 echo "  Status: launchctl list | grep vpn-router"
 echo "  Stoppen: launchctl unload $PLIST"
 echo "  Log: tail -f /tmp/vpn-router.log"
-echo "  Browser: http://localhost:3000"
+echo "  Browser: http://localhost:3080"
