@@ -239,7 +239,7 @@ api_key_ref = ""
 models = ["qwen2.5:72b-instruct-q4_K_M", "huihui_ai/qwen2.5-abliterate:32b-instruct", "bge-m3", "qllama/bge-reranker-v2-m3"]
 enabled = true
 priority = 0
-request_timeout_seconds = 120            # 2 Min — 32B+72B passen parallel in 107 GB GTT
+request_timeout_seconds = 300            # 5 Min — 72B braucht bei langen Antworten mehr Zeit
 
 [[llm_gateway.providers]]
 name = "ollama-egpu"

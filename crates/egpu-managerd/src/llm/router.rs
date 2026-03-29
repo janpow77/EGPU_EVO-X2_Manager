@@ -164,12 +164,21 @@ impl LlmRouter {
 
     /// Gemeinsame Vorpruefungen fuer chat_completion und chat_completion_stream:
     /// Modell-Aufloesung, Permissions, Budget, Provider-Auswahl, VRAM-Preemption, Rate-Limit.
+    /// Default max_tokens wenn der Client keins setzt.
+    /// Verhindert, dass 72B-Modelle endlos generieren und den Timeout sprengen.
+    const DEFAULT_MAX_TOKENS: u32 = 4096;
+
     async fn preflight(
         &self,
         request: &mut ChatCompletionRequest,
         app_id: &str,
     ) -> Result<Arc<dyn LlmProvider>, GatewayError> {
         request.app_id = Some(app_id.to_string());
+
+        // Default max_tokens setzen falls nicht vom Client angegeben
+        if request.max_tokens.is_none() {
+            request.max_tokens = Some(Self::DEFAULT_MAX_TOKENS);
+        }
 
         // GPU-Aware: Modell aus Workload-Typ auflösen
         let (resolved_model, resolved_instance) =
