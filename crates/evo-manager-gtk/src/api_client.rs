@@ -41,6 +41,7 @@ pub async fn poll_loop(tx: async_channel::Sender<WidgetState>) {
                 let ws = WidgetState {
                     connection: ConnectionState::Connected,
                     metrics: Some(metrics),
+                    config: Some(config.clone()),
                 };
                 if tx.send(ws).await.is_err() {
                     break;
@@ -58,7 +59,8 @@ pub async fn poll_loop(tx: async_channel::Sender<WidgetState>) {
 
                 let ws = WidgetState {
                     connection: conn,
-                    ..Default::default()
+                    metrics: None,
+                    config: Some(config.clone()),
                 };
                 if tx.send(ws).await.is_err() {
                     break;

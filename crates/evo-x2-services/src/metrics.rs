@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -185,6 +186,7 @@ pub async fn serve(host: &str, port: u16) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/metrics", get(handle_metrics))
         .route("/health", get(handle_health))
+        .route("/restart-ollama", post(handle_restart_ollama))
         .with_state(state);
 
     let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
@@ -195,6 +197,40 @@ pub async fn serve(host: &str, port: u16) -> anyhow::Result<()> {
 
 async fn handle_health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+/// POST /restart-ollama — Startet den Ollama-Service auf der EVO X2 neu.
+/// Loest blockierte Modelle (z.B. nach Timeout-Requests ohne max_tokens).
+async fn handle_restart_ollama() -> (StatusCode, Json<serde_json::Value>) {
+    tracing::warn!("Ollama-Restart angefordert via /restart-ollama");
+    match tokio::process::Command::new("systemctl")
+        .args(["restart", "ollama"])
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            tracing::info!("Ollama-Restart erfolgreich");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status": "restarted"})),
+            )
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!("Ollama-Restart fehlgeschlagen: {stderr}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "message": stderr.to_string()})),
+            )
+        }
+        Err(e) => {
+            tracing::error!("systemctl nicht ausfuehrbar: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "message": e.to_string()})),
+            )
+        }
+    }
 }
 
 async fn handle_metrics(State(state): State<AppState>) -> Json<MetricsResponse> {

@@ -73,6 +73,7 @@ window {
 .res-label { font-size: 10px; color: #9c9a92; }
 .res-val { font-size: 12px; font-weight: bold; color: #e8e7e0; }
 .conn-status { font-size: 9px; color: #9c9a92; }
+.restart-btn { background-color: rgba(249,115,22,0.15); color: #f97316; border-radius: 8px; padding: 6px 10px; font-size: 10px; font-weight: bold; }
 .tab-label { font-size: 10px; font-weight: bold; }
 .config-label { font-size: 10px; color: #9c9a92; margin-bottom: 2px; }
 .action-btn {
@@ -271,6 +272,45 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
     title.style_context().add_class("status-label");
     title.style_context().add_class("green");
     footer.pack_start(&title, false, false, 0);
+
+    // Ollama Restart-Button (HTTP-Call an evo-metrics /restart-ollama)
+    let restart_btn = Button::with_label("\u{21BB} Ollama Restart");
+    restart_btn.style_context().add_class("restart-btn");
+    restart_btn.set_tooltip_text(Some("Ollama auf der EVO X2 neustarten (loest blockierte Modelle)"));
+    let evo_ip = state.config.as_ref().map(|c| c.evo_ip.clone()).unwrap_or_default();
+    let metrics_port = state.config.as_ref().map(|c| c.metrics_port).unwrap_or(8084);
+    restart_btn.connect_clicked(move |btn| {
+        btn.set_sensitive(false);
+        btn.set_label("\u{231B} ...");
+        let ip = evo_ip.clone();
+        let port = metrics_port;
+        // Ergebnis ueber Channel zurueck an GTK-Thread
+        let (result_tx, result_rx) = glib::MainContext::channel::<bool>(glib::Priority::DEFAULT);
+        std::thread::spawn(move || {
+            let url = format!("http://{}:{}/restart-ollama", ip, port);
+            let ok = std::process::Command::new("curl")
+                .args(["-s", "--max-time", "20", "-X", "POST", &url])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            let _ = result_tx.send(ok);
+        });
+        let btn_clone = btn.clone();
+        result_rx.attach(None, move |ok| {
+            if ok {
+                btn_clone.set_label("\u{2713} OK");
+            } else {
+                btn_clone.set_label("\u{2715} Fehler");
+            }
+            btn_clone.set_sensitive(true);
+            let btn_reset = btn_clone.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
+                btn_reset.set_label("\u{21BB} Ollama Restart");
+            });
+            glib::ControlFlow::Break
+        });
+    });
+    footer.pack_start(&restart_btn, false, false, 0);
 
     let conn_text = match &state.connection {
         ConnectionState::Connected => "\u{25CF} Verbunden".to_string(),

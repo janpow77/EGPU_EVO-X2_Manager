@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use crate::config::EvoConfig;
+
 /// Connection state to the EVO-X2.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
@@ -10,10 +12,18 @@ pub enum ConnectionState {
 }
 
 /// Full widget state, updated by the polling loop.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct WidgetState {
     pub connection: ConnectionState,
     pub metrics: Option<EvoMetrics>,
+    pub config: Option<EvoConfig>,
+}
+
+impl PartialEq for WidgetState {
+    fn eq(&self, other: &Self) -> bool {
+        // Config-Feld wird beim Vergleich ignoriert (aendert sich selten)
+        self.connection == other.connection && self.metrics == other.metrics
+    }
 }
 
 impl Default for WidgetState {
@@ -21,6 +31,7 @@ impl Default for WidgetState {
         Self {
             connection: ConnectionState::Connecting,
             metrics: None,
+            config: None,
         }
     }
 }
