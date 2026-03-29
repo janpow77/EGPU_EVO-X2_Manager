@@ -91,6 +91,7 @@ window {
 .prio-4 { background-color: rgba(118,185,0,0.2); color: #76b900; }
 .prio-5 { background-color: rgba(107,114,128,0.2); color: #9c9a92; }
 .open-btn { background-color: rgba(0,176,240,0.15); color: #00b0f0; border-radius: 8px; padding: 8px 16px; font-size: 11px; font-weight: bold; }
+.restart-btn { background-color: rgba(249,115,22,0.15); color: #f97316; border-radius: 8px; padding: 8px 12px; font-size: 10px; font-weight: bold; }
 .conn-status { font-size: 9px; color: #9c9a92; }
 .health-card { background-color: #2a2a27; border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; }
 .health-label { font-size: 10px; color: #9c9a92; }
@@ -239,6 +240,23 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
         let _ = open::that("http://127.0.0.1:7842");
     });
     footer.pack_start(&btn, false, false, 0);
+
+    let restart_btn = Button::with_label("\u{21BB} Daemon Restart");
+    restart_btn.style_context().add_class("restart-btn");
+    restart_btn.set_tooltip_text(Some("systemctl restart egpu-managerd (erfordert Passwort)"));
+    restart_btn.connect_clicked(|_| {
+        std::thread::spawn(|| {
+            let status = std::process::Command::new("pkexec")
+                .args(["systemctl", "restart", "egpu-managerd"])
+                .status();
+            match status {
+                Ok(s) if s.success() => tracing::info!("Daemon Restart erfolgreich"),
+                Ok(s) => tracing::warn!("Daemon Restart fehlgeschlagen: {s}"),
+                Err(e) => tracing::warn!("pkexec nicht verfuegbar: {e}"),
+            }
+        });
+    });
+    footer.pack_start(&restart_btn, false, false, 0);
 
     let conn_text = match &state.connection {
         ConnectionState::Connected => "\u{25CF} Verbunden".to_string(),

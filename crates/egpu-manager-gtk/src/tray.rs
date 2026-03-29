@@ -60,6 +60,21 @@ pub fn create_tray(
     web_item.connect_activate(move |_| on_open_web());
     menu.append(&web_item);
 
+    let restart_item = gtk::MenuItem::with_label("Daemon neustarten");
+    restart_item.connect_activate(|_| {
+        std::thread::spawn(|| {
+            let status = std::process::Command::new("pkexec")
+                .args(["systemctl", "restart", "egpu-managerd"])
+                .status();
+            match status {
+                Ok(s) if s.success() => tracing::info!("Daemon Restart erfolgreich"),
+                Ok(s) => tracing::warn!("Daemon Restart fehlgeschlagen: {s}"),
+                Err(e) => tracing::warn!("pkexec nicht verfuegbar: {e}"),
+            }
+        });
+    });
+    menu.append(&restart_item);
+
     menu.append(&gtk::SeparatorMenuItem::new());
 
     let quit_item = gtk::MenuItem::with_label("Beenden");
