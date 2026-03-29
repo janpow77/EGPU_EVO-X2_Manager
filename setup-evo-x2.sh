@@ -207,11 +207,11 @@ phase_models() {
     info "[2/4] bge-reranker-v2-m3 — Reranker (~636 MB) ..."
     evo "ollama pull qllama/bge-reranker-v2-m3" && ok "bge-reranker-v2-m3" || fail "bge-reranker-v2-m3"
 
-    # ---- Qwen2.5-72B (RAG, Checklisten, Rechnungen) ----
-    info "[3/4] qwen3:32b — Haupt-LLM (~47 GB) ..."
+    # ---- Qwen3-32B (RAG, Checklisten, Rechnungen) ----
+    info "[3/4] qwen3:32b — Haupt-LLM (~20 GB) ..."
     evo "ollama pull qwen3:32b" && ok "qwen3:32b" || fail "qwen3:32b"
 
-    # ---- Qwen2.5-32B abliterated (love-ai, unzensiert, parallel mit 72B) ----
+    # ---- Qwen2.5-32B abliterated (love-ai, unzensiert, parallel mit 32B) ----
     info "[4/4] qwen2.5-abliterate:32b — Unzensiertes RP-LLM (~20 GB) ..."
     evo "ollama pull huihui_ai/qwen2.5-abliterate:32b-instruct" && ok "qwen2.5-abliterate:32b" || fail "qwen2.5-abliterate:32b"
 
