@@ -857,7 +857,7 @@ fn build_tab_config() -> ScrolledWindow {
         ("2. Ollama neustarten", "sudo systemctl restart ollama".into()),
         ("3. Ollama Status pruefen", "systemctl status ollama".into()),
         ("4. Laufende Modelle", "curl -s localhost:11434/api/ps | python3 -m json.tool".into()),
-        ("5. Alle Modelle entladen", "curl -s localhost:11434/api/generate -d '{\"model\":\"qwen2.5:72b-instruct-q4_K_M\",\"keep_alive\":0}'".into()),
+        ("5. Alle Modelle entladen", "curl -s localhost:11434/api/generate -d '{\"model\":\"qwen3:32b\",\"keep_alive\":0}'".into()),
         ("6. System neustarten", "sudo reboot".into()),
     ];
 

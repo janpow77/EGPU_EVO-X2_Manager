@@ -208,8 +208,8 @@ phase_models() {
     evo "ollama pull qllama/bge-reranker-v2-m3" && ok "bge-reranker-v2-m3" || fail "bge-reranker-v2-m3"
 
     # ---- Qwen2.5-72B (RAG, Checklisten, Rechnungen) ----
-    info "[3/4] qwen2.5:72b — Haupt-LLM (~47 GB) ..."
-    evo "ollama pull qwen2.5:72b-instruct-q4_K_M" && ok "qwen2.5:72b-instruct-q4_K_M" || fail "qwen2.5:72b-instruct-q4_K_M"
+    info "[3/4] qwen3:32b — Haupt-LLM (~47 GB) ..."
+    evo "ollama pull qwen3:32b" && ok "qwen3:32b" || fail "qwen3:32b"
 
     # ---- Qwen2.5-32B abliterated (love-ai, unzensiert, parallel mit 72B) ----
     info "[4/4] qwen2.5-abliterate:32b — Unzensiertes RP-LLM (~20 GB) ..."

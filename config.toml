@@ -236,7 +236,7 @@ name = "ollama-evo-x2"
 provider_type = "openai_compatible"
 base_url = "http://100.81.4.99:11434"    # EVO-X2 Tailscale-IP (stabil, auch außerhalb LAN)
 api_key_ref = ""
-models = ["qwen2.5:72b-instruct-q4_K_M", "huihui_ai/qwen2.5-abliterate:32b-instruct", "bge-m3", "qllama/bge-reranker-v2-m3"]
+models = ["qwen3:32b", "huihui_ai/qwen2.5-abliterate:32b-instruct", "bge-m3", "qllama/bge-reranker-v2-m3"]
 enabled = true
 priority = 0
 request_timeout_seconds = 300            # 5 Min — 72B braucht bei langen Antworten mehr Zeit
@@ -268,25 +268,25 @@ priority = 2
 app_id = "audit_designer"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen2.5:72b-instruct-q4_K_M", embeddings = "bge-m3", reranking = "qllama/bge-reranker-v2-m3" }
+workload_model_map = { llm = "qwen3:32b", embeddings = "bge-m3", reranking = "qllama/bge-reranker-v2-m3" }
 
 [[llm_gateway.app_routing]]
 app_id = "flowinvoice"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen2.5:72b-instruct-q4_K_M", ocr = "qwen3:14b" }
+workload_model_map = { llm = "qwen3:32b", ocr = "qwen3:14b" }
 
 [[llm_gateway.app_routing]]
 app_id = "flowstat"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen2.5:72b-instruct-q4_K_M" }
+workload_model_map = { llm = "qwen3:32b" }
 
 [[llm_gateway.app_routing]]
 app_id = "riskanalysis"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen2.5:72b-instruct-q4_K_M", embeddings = "bge-m3" }
+workload_model_map = { llm = "qwen3:32b", embeddings = "bge-m3" }
 
 [[llm_gateway.app_routing]]
 app_id = "love-ai"

@@ -87,7 +87,7 @@ ExecStart=/bin/bash -c '\
     -d "{\"model\":\"huihui_ai/qwen2.5-abliterate:32b-instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"warmup\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" >/dev/null 2>&1 && \
   echo "Lade qwen2.5-72b..." && \
   curl -sf --max-time 300 http://localhost:11434/api/chat \
-    -d "{\"model\":\"qwen2.5:72b-instruct-q4_K_M\",\"messages\":[{\"role\":\"user\",\"content\":\"warmup\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" >/dev/null 2>&1 && \
+    -d "{\"model\":\"qwen3:32b\",\"messages\":[{\"role\":\"user\",\"content\":\"warmup\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" >/dev/null 2>&1 && \
   echo "Alle Modelle geladen."'
 TimeoutStartSec=600
 StandardOutput=journal

@@ -26,7 +26,7 @@ SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=y
 EXPECTED_MODELS=(
     "bge-m3"
     "qllama/bge-reranker-v2-m3"
-    "qwen2.5:72b-instruct-q4_K_M"
+    "qwen3:32b"
     "huihui_ai/qwen2.5-abliterate:32b-instruct"
 )
 
@@ -226,17 +226,17 @@ test_ollama_inference() {
         fail "Embedding-Inferenz (bge-m3): fehlgeschlagen"
     fi
 
-    # Chat-Test mit qwen2.5:72b (kurze Antwort, max 10 Tokens)
+    # Chat-Test mit qwen3:32b (kurze Antwort, max 10 Tokens)
     local chat_result
     chat_result=$(curl -sf --connect-timeout 10 --max-time 120 \
         "http://$EVO_IP:11434/api/chat" \
-        -d '{"model":"qwen2.5:72b-instruct-q4_K_M","messages":[{"role":"user","content":"Say OK"}],"stream":false,"options":{"num_predict":10}}' 2>/dev/null)
+        -d '{"model":"qwen3:32b","messages":[{"role":"user","content":"Say OK"}],"stream":false,"options":{"num_predict":10}}' 2>/dev/null)
 
     if echo "$chat_result" | grep -q "message"; then
-        pass "Chat-Inferenz (qwen2.5:72b): OK"
+        pass "Chat-Inferenz (qwen3:32b): OK"
     else
         # Könnte Cold-Start sein (>60s für 47 GB in GTT)
-        warn "Chat-Inferenz (qwen2.5:72b): Timeout oder Fehler — Cold-Start?"
+        warn "Chat-Inferenz (qwen3:32b): Timeout oder Fehler — Cold-Start?"
     fi
 
     # Abliterate-32B Test (love-ai Modell, passt parallel mit 72B in GTT)
