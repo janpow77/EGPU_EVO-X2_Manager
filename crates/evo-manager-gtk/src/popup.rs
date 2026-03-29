@@ -74,6 +74,10 @@ window {
 .res-val { font-size: 12px; font-weight: bold; color: #e8e7e0; }
 .conn-status { font-size: 9px; color: #9c9a92; }
 .restart-btn { background-color: rgba(249,115,22,0.15); color: #f97316; border-radius: 8px; padding: 6px 10px; font-size: 10px; font-weight: bold; }
+.ssh-btn { background-color: rgba(0,176,240,0.15); color: #00b0f0; border-radius: 8px; padding: 6px 10px; font-size: 10px; font-weight: bold; }
+.help-card { background-color: #2a2a27; border-radius: 8px; padding: 10px 12px; margin-bottom: 6px; }
+.help-title { font-size: 11px; font-weight: bold; color: #f97316; margin-bottom: 4px; }
+.help-text { font-size: 9px; color: #9c9a92; font-family: monospace; }
 .tab-label { font-size: 10px; font-weight: bold; }
 .config-label { font-size: 10px; color: #9c9a92; margin-bottom: 2px; }
 .action-btn {
@@ -311,6 +315,35 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
         });
     });
     footer.pack_start(&restart_btn, false, false, 0);
+
+    // SSH-Terminal-Button
+    let ssh_ip = state.config.as_ref().map(|c| {
+        if c.tailscale_ip.is_empty() { c.evo_ip.clone() } else { c.tailscale_ip.clone() }
+    }).unwrap_or_default();
+    let ssh_user = state.config.as_ref().map(|c| c.ssh_user.clone()).unwrap_or_else(|| "janpow".into());
+    let ssh_btn = Button::with_label("\u{1F4BB} SSH");
+    ssh_btn.style_context().add_class("ssh-btn");
+    ssh_btn.set_tooltip_text(Some(&format!("Terminal: ssh {ssh_user}@{ssh_ip}")));
+    ssh_btn.connect_clicked(move |_| {
+        let target = format!("{}@{}", ssh_user, ssh_ip);
+        // Versuche verschiedene Terminal-Emulatoren
+        let terminals = [
+            ("gnome-terminal", vec!["--", "ssh", "-t", &target]),
+            ("xterm", vec!["-e", "ssh", "-t", &target]),
+            ("konsole", vec!["-e", "ssh", "-t", &target]),
+        ];
+        for (term, args) in &terminals {
+            if std::process::Command::new(term)
+                .args(args)
+                .spawn()
+                .is_ok()
+            {
+                return;
+            }
+        }
+        tracing::warn!("Kein Terminal-Emulator gefunden");
+    });
+    footer.pack_start(&ssh_btn, false, false, 0);
 
     let conn_text = match &state.connection {
         ConnectionState::Connected => "\u{25CF} Verbunden".to_string(),
@@ -798,6 +831,53 @@ fn build_tab_config() -> ScrolledWindow {
     path_info.set_margin_top(8);
     path_info.set_halign(Align::Start);
     content.pack_start(&path_info, false, false, 0);
+
+    // ── Notfall-Hilfe ──
+    content.pack_start(&Separator::new(Orientation::Horizontal), false, false, 0);
+
+    let help_title = Label::new(Some("NOTFALL-VERBINDUNG"));
+    help_title.style_context().add_class("section-title");
+    help_title.set_halign(Align::Start);
+    content.pack_start(&help_title, false, false, 0);
+
+    let help_card = GtkBox::new(Orientation::Vertical, 4);
+    help_card.style_context().add_class("help-card");
+
+    let help_header = Label::new(Some("Wenn nichts mehr geht:"));
+    help_header.style_context().add_class("help-title");
+    help_header.set_halign(Align::Start);
+    help_card.pack_start(&help_header, false, false, 0);
+
+    let ssh_target = format!(
+        "ssh -t {}@{}", config.ssh_user,
+        if config.tailscale_ip.is_empty() { &config.evo_ip } else { &config.tailscale_ip }
+    );
+    let commands: Vec<(&str, String)> = vec![
+        ("1. SSH Terminal oeffnen", ssh_target),
+        ("2. Ollama neustarten", "sudo systemctl restart ollama".into()),
+        ("3. Ollama Status pruefen", "systemctl status ollama".into()),
+        ("4. Laufende Modelle", "curl -s localhost:11434/api/ps | python3 -m json.tool".into()),
+        ("5. Alle Modelle entladen", "curl -s localhost:11434/api/generate -d '{\"model\":\"qwen2.5:72b-instruct-q4_K_M\",\"keep_alive\":0}'".into()),
+        ("6. System neustarten", "sudo reboot".into()),
+    ];
+
+    for (label, cmd) in &commands {
+        let row = GtkBox::new(Orientation::Vertical, 1);
+        let lbl = Label::new(Some(label));
+        lbl.style_context().add_class("gpu-stat-val");
+        lbl.set_halign(Align::Start);
+        row.pack_start(&lbl, false, false, 0);
+
+        let cmd_lbl = Label::new(Some(cmd));
+        cmd_lbl.style_context().add_class("help-text");
+        cmd_lbl.set_halign(Align::Start);
+        cmd_lbl.set_selectable(true);
+        row.pack_start(&cmd_lbl, false, false, 0);
+
+        help_card.pack_start(&row, false, false, 2);
+    }
+
+    content.pack_start(&help_card, false, false, 0);
 
     let scroll = ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
     scroll.add(&content);
