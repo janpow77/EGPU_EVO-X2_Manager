@@ -60,16 +60,25 @@ pub fn create_tray(
     web_item.connect_activate(move |_| on_open_web());
     menu.append(&web_item);
 
-    let restart_item = gtk::MenuItem::with_label("Daemon neustarten");
+    let restart_item = gtk::MenuItem::with_label("Deploy + Restart");
     restart_item.connect_activate(|_| {
         std::thread::spawn(|| {
-            let status = std::process::Command::new("pkexec")
-                .args(["systemctl", "restart", "egpu-managerd"])
-                .status();
-            match status {
-                Ok(s) if s.success() => tracing::info!("Daemon Restart erfolgreich"),
-                Ok(s) => tracing::warn!("Daemon Restart fehlgeschlagen: {s}"),
-                Err(e) => tracing::warn!("pkexec nicht verfuegbar: {e}"),
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/janpow".into());
+            let script = format!("{home}/Projekte/EGPU_EVO-X2_Manager/deploy.sh");
+            if std::path::Path::new(&script).exists() {
+                let status = std::process::Command::new("pkexec")
+                    .args(["bash", &script])
+                    .status();
+                match status {
+                    Ok(s) if s.success() => tracing::info!("Deploy + Restart erfolgreich"),
+                    Ok(s) => tracing::warn!("Deploy fehlgeschlagen: {s}"),
+                    Err(e) => tracing::warn!("pkexec nicht verfuegbar: {e}"),
+                }
+            } else {
+                tracing::warn!("deploy.sh nicht gefunden, nur Restart");
+                let _ = std::process::Command::new("pkexec")
+                    .args(["systemctl", "restart", "egpu-managerd"])
+                    .status();
             }
         });
     });

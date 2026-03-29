@@ -2,24 +2,31 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Wenn bereits root (z.B. via pkexec), kein sudo noetig
+if [ "$(id -u)" -eq 0 ]; then
+    SUDO=""
+else
+    SUDO="sudo"
+fi
+
 echo "=== eGPU Manager Deploy ==="
 
 echo "[1/5] Stoppe Daemon..."
-sudo systemctl stop egpu-managerd
+$SUDO systemctl stop egpu-managerd
 
 echo "[2/5] Installiere Binary..."
-sudo cp target/release/egpu-managerd /usr/local/bin/egpu-managerd
-sudo chmod 755 /usr/local/bin/egpu-managerd
+$SUDO cp target/release/egpu-managerd /usr/local/bin/egpu-managerd
+$SUDO chmod 755 /usr/local/bin/egpu-managerd
 
 echo "[3/5] Aktualisiere Config..."
-sudo cp config.toml /etc/egpu-manager/config.toml
+$SUDO cp config.toml /etc/egpu-manager/config.toml
 
 echo "[4/5] Aktualisiere Service..."
-sudo cp egpu-managerd.service /etc/systemd/system/egpu-managerd.service
-sudo systemctl daemon-reload
+$SUDO cp egpu-managerd.service /etc/systemd/system/egpu-managerd.service
+$SUDO systemctl daemon-reload
 
 echo "[5/5] Starte Daemon..."
-sudo systemctl start egpu-managerd
+$SUDO systemctl start egpu-managerd
 sleep 3
 
 echo ""

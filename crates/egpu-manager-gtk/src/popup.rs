@@ -241,17 +241,29 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
     });
     footer.pack_start(&btn, false, false, 0);
 
-    let restart_btn = Button::with_label("\u{21BB} Daemon Restart");
+    let restart_btn = Button::with_label("\u{21BB} Deploy + Restart");
     restart_btn.style_context().add_class("restart-btn");
-    restart_btn.set_tooltip_text(Some("systemctl restart egpu-managerd (erfordert Passwort)"));
+    restart_btn.set_tooltip_text(Some("Binary + Config deployen und Daemon neustarten (deploy.sh)"));
     restart_btn.connect_clicked(|_| {
         std::thread::spawn(|| {
+            // deploy.sh im Repo-Verzeichnis ausfuehren (stop, copy binary+config, start)
+            let repo_dir = find_repo_dir();
+            let script = format!("{}/deploy.sh", repo_dir);
+            if !std::path::Path::new(&script).exists() {
+                // Fallback: nur systemctl restart
+                tracing::warn!("deploy.sh nicht gefunden, nur Restart");
+                let _ = std::process::Command::new("pkexec")
+                    .args(["systemctl", "restart", "egpu-managerd"])
+                    .status();
+                return;
+            }
+            // deploy.sh nutzt sudo intern, pkexec fuer graphischen Prompt
             let status = std::process::Command::new("pkexec")
-                .args(["systemctl", "restart", "egpu-managerd"])
+                .args(["bash", &script])
                 .status();
             match status {
-                Ok(s) if s.success() => tracing::info!("Daemon Restart erfolgreich"),
-                Ok(s) => tracing::warn!("Daemon Restart fehlgeschlagen: {s}"),
+                Ok(s) if s.success() => tracing::info!("Deploy + Restart erfolgreich"),
+                Ok(s) => tracing::warn!("Deploy fehlgeschlagen: {s}"),
                 Err(e) => tracing::warn!("pkexec nicht verfuegbar: {e}"),
             }
         });
@@ -683,6 +695,29 @@ fn build_health_score_card(hs: &HealthScoreInfo) -> GtkBox {
     }
 
     card
+}
+
+/// Findet das Repo-Verzeichnis anhand des laufenden Binary-Pfads oder bekannter Pfade.
+fn find_repo_dir() -> String {
+    // 1. Relativ zum Binary (target/release/ -> repo root)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
+            let deploy = parent.join("deploy.sh");
+            if deploy.exists() {
+                return parent.to_string_lossy().to_string();
+            }
+        }
+    }
+    // 2. Bekannter Pfad
+    let known = std::path::PathBuf::from(
+        std::env::var("HOME").unwrap_or_else(|_| "/home/janpow".into()),
+    )
+    .join("Projekte/EGPU_EVO-X2_Manager");
+    if known.join("deploy.sh").exists() {
+        return known.to_string_lossy().to_string();
+    }
+    // 3. Fallback
+    known.to_string_lossy().to_string()
 }
 
 fn build_remote_gpu_card(rgpu: &RemoteGpuInfo) -> GtkBox {
