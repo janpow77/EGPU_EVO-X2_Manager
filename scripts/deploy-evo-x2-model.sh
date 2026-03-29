@@ -17,37 +17,29 @@ echo ""
 # SSH-Verbindung testen
 echo "[1/5] SSH-Verbindung pruefen..."
 if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "${EVO_USER}@${EVO_IP}" "echo ok" 2>/dev/null; then
-    echo "  SSH ohne Passwort nicht moeglich. Starte interaktiv..."
-    echo "  (Bitte Passwort eingeben wenn gefragt)"
-    SSH_OPTS="-t"
-else
-    SSH_OPTS=""
-    echo "  OK — SSH-Key funktioniert"
+    echo "  FEHLER: SSH-Key nicht konfiguriert. Bitte erst:"
+    echo "    ssh-copy-id ${EVO_USER}@${EVO_IP}"
+    exit 1
 fi
+echo "  OK"
+SSH="ssh -t ${EVO_USER}@${EVO_IP}"
 
 # Ollama NUM_PARALLEL konfigurieren
 echo ""
 echo "[2/5] Ollama NUM_PARALLEL=2 konfigurieren..."
-ssh ${SSH_OPTS} "${EVO_USER}@${EVO_IP}" bash -s <<'REMOTE_SCRIPT'
-set -e
-sudo mkdir -p /etc/systemd/system/ollama.service.d
-echo '[Service]
-Environment="OLLAMA_NUM_PARALLEL=2"
-Environment="OLLAMA_MAX_QUEUE=8"' | sudo tee /etc/systemd/system/ollama.service.d/parallel.conf > /dev/null
-echo "  Override geschrieben: NUM_PARALLEL=2, MAX_QUEUE=8"
-sudo systemctl daemon-reload
-echo "  systemd daemon-reload OK"
-REMOTE_SCRIPT
+${SSH} "sudo mkdir -p /etc/systemd/system/ollama.service.d && echo '[Service]
+Environment=\"OLLAMA_NUM_PARALLEL=2\"
+Environment=\"OLLAMA_MAX_QUEUE=8\"' | sudo tee /etc/systemd/system/ollama.service.d/parallel.conf && sudo systemctl daemon-reload && echo 'OK: NUM_PARALLEL=2, MAX_QUEUE=8'"
 
 # Neues Modell pullen
 echo ""
 echo "[3/5] Modell ${NEW_MODEL} herunterladen (kann einige Minuten dauern)..."
-ssh ${SSH_OPTS} "${EVO_USER}@${EVO_IP}" "ollama pull ${NEW_MODEL}"
+${SSH} "ollama pull ${NEW_MODEL}"
 
 # Ollama neustarten
 echo ""
 echo "[4/5] Ollama neustarten..."
-ssh ${SSH_OPTS} "${EVO_USER}@${EVO_IP}" "sudo systemctl restart ollama"
+${SSH} "sudo systemctl restart ollama"
 echo "  Warte 5s auf Start..."
 sleep 5
 
