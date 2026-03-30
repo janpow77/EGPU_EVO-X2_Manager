@@ -197,23 +197,20 @@ phase_models() {
     header "Phase 4b: Modelle laden"
     check_ssh
 
-    info "Lade Modelle — das dauert bei 72B-Modellen eine Weile ..."
+    info "Lade Modelle ..."
     echo ""
 
-    # ---- Embeddings + Reranker (klein, schnell) ----
-    info "[1/4] bge-m3 — Embeddings (1024d, ~1.2 GB) ..."
+    # ---- Embeddings (klein, schnell) ----
+    info "[1/3] bge-m3 — Embeddings (1024d, ~1.2 GB) ..."
     evo "ollama pull bge-m3" && ok "bge-m3" || fail "bge-m3"
 
-    info "[2/4] bge-reranker-v2-m3 — Reranker (~636 MB) ..."
-    evo "ollama pull qllama/bge-reranker-v2-m3" && ok "bge-reranker-v2-m3" || fail "bge-reranker-v2-m3"
-
     # ---- Qwen3-32B (RAG, Checklisten, Rechnungen) ----
-    info "[3/4] qwen3:32b — Haupt-LLM (~20 GB) ..."
+    info "[2/3] qwen3:32b — Haupt-LLM (~20 GB) ..."
     evo "ollama pull qwen3:32b" && ok "qwen3:32b" || fail "qwen3:32b"
 
-    # ---- Qwen2.5-32B abliterated (love-ai, unzensiert, parallel mit 32B) ----
-    info "[4/4] qwen2.5-abliterate:32b — Unzensiertes RP-LLM (~20 GB) ..."
-    evo "ollama pull huihui_ai/qwen2.5-abliterate:32b-instruct" && ok "qwen2.5-abliterate:32b" || fail "qwen2.5-abliterate:32b"
+    # ---- love-ai-midnight (love-ai, unzensiert) ----
+    info "[3/3] love-ai-midnight:latest — Unzensiertes RP-LLM ..."
+    evo "ollama pull love-ai-midnight:latest" && ok "love-ai-midnight" || fail "love-ai-midnight"
 
     echo ""
     info "Installierte Modelle:"

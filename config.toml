@@ -236,7 +236,7 @@ name = "ollama-evo-x2"
 provider_type = "openai_compatible"
 base_url = "http://100.81.4.99:11434"    # EVO-X2 Tailscale-IP (stabil, auch außerhalb LAN)
 api_key_ref = ""
-models = ["qwen3:32b", "huihui_ai/qwen2.5-abliterate:32b-instruct", "bge-m3", "qllama/bge-reranker-v2-m3"]
+models = ["qwen3:32b", "love-ai-midnight:latest", "bge-m3"]
 enabled = true
 priority = 0
 request_timeout_seconds = 300            # 5 Min — grosse Modelle brauchen bei langen Antworten mehr Zeit
@@ -262,13 +262,13 @@ priority = 2
 # --- App-Routing: Jede App bekommt eigene GPU/Modell-Präferenzen ---
 # EVO-X2 ist primary für LLM/Embeddings, lokale GPUs als Fallback.
 # love-ai hat NUR EVO-X2 (kein Fallback gewünscht).
-# 32B-abliterate (love-ai) + qwen3:32b (Arbeit) + bge-m3 = ~62 GB → passen parallel in 107 GB GTT.
+# love-ai-midnight + qwen3:32b (Arbeit) + bge-m3 = ~62 GB → passen parallel in 107 GB GTT.
 
 [[llm_gateway.app_routing]]
 app_id = "audit_designer"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2", "ollama-egpu", "ollama-internal"]
-workload_model_map = { llm = "qwen3:32b", embeddings = "bge-m3", reranking = "qllama/bge-reranker-v2-m3" }
+workload_model_map = { llm = "qwen3:32b", embeddings = "bge-m3" }
 
 [[llm_gateway.app_routing]]
 app_id = "flowinvoice"
@@ -292,7 +292,7 @@ workload_model_map = { llm = "qwen3:32b", embeddings = "bge-m3" }
 app_id = "love-ai"
 preferred_provider = "ollama-evo-x2"
 allowed_providers = ["ollama-evo-x2"]
-workload_model_map = { llm = "huihui_ai/qwen2.5-abliterate:32b-instruct", embeddings = "bge-m3" }
+workload_model_map = { llm = "love-ai-midnight:latest", embeddings = "bge-m3" }
 
 # --- Remote GPUs ---
 

@@ -25,9 +25,8 @@ SSH_OPTS="-o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new -o BatchMode=y
 # Erwartete Modelle auf EVO-X2
 EXPECTED_MODELS=(
     "bge-m3"
-    "qllama/bge-reranker-v2-m3"
     "qwen3:32b"
-    "huihui_ai/qwen2.5-abliterate:32b-instruct"
+    "love-ai-midnight"
 )
 
 # Farben
@@ -239,22 +238,22 @@ test_ollama_inference() {
         warn "Chat-Inferenz (qwen3:32b): Timeout oder Fehler — Cold-Start?"
     fi
 
-    # Abliterate-32B Test (love-ai Modell, passt parallel mit 72B in GTT)
+    # love-ai-midnight Test (love-ai Modell)
     local models_json
     models_json=$(curl -sf --connect-timeout 5 "http://$EVO_IP:11434/api/tags" 2>/dev/null || echo "")
-    if echo "$models_json" | grep -q "abliterate"; then
-        local abl_result
-        abl_result=$(curl -sf --connect-timeout 10 --max-time 60 \
+    if echo "$models_json" | grep -q "love-ai-midnight"; then
+        local midnight_result
+        midnight_result=$(curl -sf --connect-timeout 10 --max-time 60 \
             "http://$EVO_IP:11434/api/chat" \
-            -d '{"model":"huihui_ai/qwen2.5-abliterate:32b-instruct","messages":[{"role":"user","content":"Say OK"}],"stream":false,"options":{"num_predict":10}}' 2>/dev/null)
+            -d '{"model":"love-ai-midnight:latest","messages":[{"role":"user","content":"Say OK"}],"stream":false,"options":{"num_predict":10}}' 2>/dev/null)
 
-        if echo "$abl_result" | grep -q "message"; then
-            pass "Chat-Inferenz (abliterate-32b): OK"
+        if echo "$midnight_result" | grep -q "message"; then
+            pass "Chat-Inferenz (love-ai-midnight): OK"
         else
-            warn "Chat-Inferenz (abliterate-32b): Timeout oder Fehler"
+            warn "Chat-Inferenz (love-ai-midnight): Timeout oder Fehler"
         fi
     else
-        skip "abliterate-32b nicht installiert — übersprungen"
+        skip "love-ai-midnight nicht installiert — übersprungen"
     fi
 
     # Parallel-Test: Prüfe ob beide Modelle gleichzeitig geladen sind
@@ -410,7 +409,7 @@ test_loveai_config() {
     # Unzensiertes Modell konfiguriert?
     local chat_model
     chat_model=$(grep "^OLLAMA_CHAT_MODEL=" "$env_file" | cut -d= -f2- || echo "")
-    if echo "$chat_model" | grep -qiE "dolphin|abliterate|uncensored"; then
+    if echo "$chat_model" | grep -qiE "love-ai-midnight|dolphin|abliterate|uncensored"; then
         pass "OLLAMA_CHAT_MODEL (unzensiert): $chat_model"
     else
         warn "OLLAMA_CHAT_MODEL nicht als unzensiert erkannt: $chat_model"

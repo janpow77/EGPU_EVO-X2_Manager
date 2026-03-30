@@ -67,7 +67,7 @@ EOF
 # Modell-Preload Service (nach jedem Boot)
 cat > /tmp/evo-ollama-preload.service << 'EOF'
 [Unit]
-Description=Ollama Modell-Preload (32B + 72B + bge-m3)
+Description=Ollama Modell-Preload (qwen3:32b + love-ai-midnight + bge-m3)
 After=ollama.service network-online.target
 Requires=ollama.service
 Wants=network-online.target
@@ -82,9 +82,9 @@ ExecStart=/bin/bash -c '\
   echo "Lade bge-m3..." && \
   curl -sf --max-time 60 http://localhost:11434/api/embed \
     -d "{\"model\":\"bge-m3\",\"input\":\"warmup\"}" >/dev/null 2>&1 && \
-  echo "Lade abliterate-32b..." && \
+  echo "Lade love-ai-midnight..." && \
   curl -sf --max-time 300 http://localhost:11434/api/chat \
-    -d "{\"model\":\"huihui_ai/qwen2.5-abliterate:32b-instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"warmup\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" >/dev/null 2>&1 && \
+    -d "{\"model\":\"love-ai-midnight:latest\",\"messages\":[{\"role\":\"user\",\"content\":\"warmup\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" >/dev/null 2>&1 && \
   echo "Lade qwen3:32b..." && \
   curl -sf --max-time 300 http://localhost:11434/api/chat \
     -d "{\"model\":\"qwen3:32b\",\"messages\":[{\"role\":\"user\",\"content\":\"warmup\"}],\"stream\":false,\"options\":{\"num_predict\":1}}" >/dev/null 2>&1 && \

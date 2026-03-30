@@ -5,11 +5,11 @@ set -euo pipefail
 
 EVO_IP="${EVO_X2_IP:-100.81.4.99}"
 EVO_USER="${EVO_X2_USER:-janpow}"
-NEW_MODEL="qwen3:32b"
-OLD_MODEL="qwen2.5:72b-instruct-q4_K_M"
+NEW_MODEL="love-ai-midnight:latest"
+OLD_MODEL=""
 
 echo "============================================="
-echo "  EVO X2 Modell-Deploy: ${OLD_MODEL} → ${NEW_MODEL}"
+echo "  EVO X2 Modell-Deploy: ${NEW_MODEL}"
 echo "  Ziel: ${EVO_USER}@${EVO_IP}"
 echo "============================================="
 echo ""
