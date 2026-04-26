@@ -1,0 +1,22 @@
+[package]
+name = "flowaudit-launcher-gtk"
+version.workspace = true
+edition.workspace = true
+description = "GTK Tray Widget fuer FlowAudit App Launcher"
+
+[[bin]]
+name = "flowaudit-launcher-widget"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = "0.9"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+gtk = "0.18"
+glib = "0.18"
+libappindicator = "0.9"
+open = "5"
+dirs = "5"
+which = "6"

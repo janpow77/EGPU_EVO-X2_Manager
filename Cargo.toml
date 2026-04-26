@@ -9,6 +9,7 @@ members = [
     "crates/evo-manager-gtk",
     "crates/evo-x2-services",
     "crates/vpn-router",
+    "crates/flowaudit-launcher-gtk",
 ]
 
 [workspace.package]
