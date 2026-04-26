@@ -56,7 +56,7 @@ echo ""
 echo "--- Aktueller Zustand ---"
 echo "Kernel: $(uname -r)"
 echo "NVIDIA-Treiber: $(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1 2>/dev/null || echo 'nicht verfügbar')"
-echo "Aktueller CmpltTO: $(setpci -s $ROOT_PORT 0xd4.w 2>/dev/null || echo 'nicht lesbar')"
+echo "Aktueller CmpltTO: $(setpci -s $ROOT_PORT CAP_EXP+0x28.w 2>/dev/null || echo 'nicht lesbar')"
 echo "ASPM-Status: $(cat /sys/module/pcie_aspm/parameters/policy 2>/dev/null || echo 'nicht lesbar')"
 echo ""
 
@@ -95,7 +95,7 @@ Before=egpu-manager.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/setpci -s $ROOT_PORT 0xd4.w=$CMPLTO_VALUE
+ExecStart=/usr/sbin/setpci -s $ROOT_PORT CAP_EXP+0x28.w=0x0406
 RemainAfterExit=yes
 
 [Install]
@@ -103,9 +103,12 @@ WantedBy=multi-user.target
 UNITEOF
 
     # Sofort setzen
-    setpci -s "$ROOT_PORT" "0xd4.w=$CMPLTO_VALUE"
+    CURRENT_CMPLTO="$(setpci -s "$ROOT_PORT" CAP_EXP+0x28.w 2>/dev/null || echo 0000)"
+    CMPLTO_NUM="${CMPLTO_VALUE#0x}"
+    NEW_CMPLTO="$(printf '%04x' "$(((0x$CURRENT_CMPLTO & 0xfff0) | (0x$CMPLTO_NUM & 0x000f)))")"
+    setpci -s "$ROOT_PORT" "CAP_EXP+0x28.w=$NEW_CMPLTO"
     echo "CmpltTO gesetzt auf $CMPLTO_VALUE"
-    echo "Neuer Wert: $(setpci -s $ROOT_PORT 0xd4.w)"
+    echo "Neuer Wert: $(setpci -s $ROOT_PORT CAP_EXP+0x28.w)"
 
     echo "systemd-Unit erstellt: $SYSTEMD_UNIT"
     echo "Aktivierung muss MANUELL erfolgen:"
@@ -133,15 +136,15 @@ if [[ "$SKIP_NVIDIA" == false ]]; then
     if [[ "$DRY_RUN" == false ]]; then
         cat > "$MODPROBE_FILE" << MODEOF
 # eGPU Manager: NVIDIA-Treiberparameter für PCIe-Stabilität
-options nvidia NVreg_EnablePCIeRelaxedOrderingMode=1
+options nvidia NVreg_EnablePCIERelaxedOrderingMode=1
 options nvidia NVreg_DynamicPowerManagement=0x00
 MODEOF
         echo "NVIDIA-Parameter geschrieben: $MODPROBE_FILE"
-        echo "  - NVreg_EnablePCIeRelaxedOrderingMode=1 (Relaxed Ordering)"
+        echo "  - NVreg_EnablePCIERelaxedOrderingMode=1 (Relaxed Ordering)"
         echo "  - NVreg_DynamicPowerManagement=0x00 (kein GPU-Suspend)"
         echo "Wird erst nach Neustart oder Treiber-Reload wirksam."
     else
-        echo "[DRY-RUN] Würde NVreg_EnablePCIeRelaxedOrderingMode=1 setzen"
+        echo "[DRY-RUN] Würde NVreg_EnablePCIERelaxedOrderingMode=1 setzen"
         echo "[DRY-RUN] Würde NVreg_DynamicPowerManagement=0x00 setzen"
     fi
     echo ""

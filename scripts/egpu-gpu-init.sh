@@ -8,7 +8,9 @@ TB_DEVICE="${TB_DEVICE:-0-3}"
 MAX_WAIT="${MAX_WAIT:-60}"
 AUTH_SETTLE_SECS="${AUTH_SETTLE_SECS:-8}"
 POST_RESCAN_SETTLE_SECS="${POST_RESCAN_SETTLE_SECS:-8}"
-CMPLTO_VALUE="${CMPLTO_VALUE:-0xA}"
+CMPLTO_VALUE="${CMPLTO_VALUE:-0x6}"
+LINK_TARGET_SPEED="${LINK_TARGET_SPEED:-0x3}"
+LINK_DOWNSTREAM_PORT="${LINK_DOWNSTREAM_PORT:-0000:04:00.0}"
 REQUIRE_EGPU=false
 DRIVERS_AUTOPROBE_PATH="/sys/bus/pci/drivers_autoprobe"
 ORIGINAL_DRIVERS_AUTOPROBE=""
@@ -179,19 +181,123 @@ tune_root_port_completion_timeout() {
     return 0
   fi
 
-  local current
-  current="$(setpci -s "$ROOT_PORT" 0xd4.w 2>/dev/null || true)"
+  local current desired value
+  current="$(setpci -s "$ROOT_PORT" CAP_EXP+0x28.w 2>/dev/null || true)"
   if [ -z "$current" ]; then
     return 0
   fi
 
-  if [ "$current" != "$CMPLTO_VALUE" ]; then
-    if setpci -s "$ROOT_PORT" "0xd4.w=$CMPLTO_VALUE" 2>/dev/null; then
-      log "Root-Port $ROOT_PORT Completion Timeout: $current -> $CMPLTO_VALUE"
+  value="${CMPLTO_VALUE#0x}"
+  desired="$(printf '%04x' "$(((0x$current & 0xfff0) | (0x$value & 0x000f)))")"
+
+  if [ "$current" != "$desired" ]; then
+    if setpci -s "$ROOT_PORT" "CAP_EXP+0x28.w=$desired" 2>/dev/null; then
+      log "Root-Port $ROOT_PORT Completion Timeout: $current -> $desired"
     else
       warn "Completion-Timeout-Setzen fehlgeschlagen auf $ROOT_PORT"
     fi
   fi
+}
+
+tune_pcie_aspm_off() {
+  local dev="$1"
+
+  if ! command -v setpci >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! device_exists "$dev"; then
+    return 0
+  fi
+
+  local current desired
+  current="$(setpci -s "$dev" CAP_EXP+0x10.w 2>/dev/null || true)"
+  if ! [[ "$current" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+    return 0
+  fi
+
+  desired="$(printf '%04x' "$((0x$current & ~0x0003))")"
+  if [ "$current" != "$desired" ]; then
+    if setpci -s "$dev" "CAP_EXP+0x10.w=$desired" 2>/dev/null; then
+      log "PCIe ASPM deaktiviert auf $dev: $current -> $desired"
+    else
+      warn "PCIe-ASPM-Deaktivierung fehlgeschlagen auf $dev"
+    fi
+  fi
+}
+
+tune_pcie_stability() {
+  tune_root_port_completion_timeout
+  tune_pcie_aspm_off "$ROOT_PORT"
+  for upstream in "${UPSTREAMS[@]}"; do
+    tune_pcie_aspm_off "$upstream"
+  done
+  tune_pcie_aspm_off "$EGPU_PCI"
+}
+
+set_link_target_speed() {
+  local dev="$1"
+
+  if [ -z "$LINK_TARGET_SPEED" ] || [ "$LINK_TARGET_SPEED" = "auto" ]; then
+    return 0
+  fi
+
+  if ! command -v setpci >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! device_exists "$dev"; then
+    return 0
+  fi
+
+  local current desired value
+  current="$(setpci -s "$dev" CAP_EXP+0x30.w 2>/dev/null || true)"
+  if ! [[ "$current" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+    return 0
+  fi
+
+  value="${LINK_TARGET_SPEED#0x}"
+  desired="$(printf '%04x' "$(((0x$current & 0xfff0) | (0x$value & 0x000f)))")"
+  if [ "$current" != "$desired" ]; then
+    if setpci -s "$dev" "CAP_EXP+0x30.w=$desired" 2>/dev/null; then
+      log "PCIe Link Target Speed auf $dev: $current -> $desired"
+    else
+      warn "PCIe-Link-Speed-Setzen fehlgeschlagen auf $dev"
+    fi
+  fi
+}
+
+retrain_link() {
+  local dev="$1"
+
+  if ! command -v setpci >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! device_exists "$dev"; then
+    return 0
+  fi
+
+  local current desired
+  current="$(setpci -s "$dev" CAP_EXP+0x10.w 2>/dev/null || true)"
+  if ! [[ "$current" =~ ^[0-9A-Fa-f]{4}$ ]]; then
+    return 0
+  fi
+
+  desired="$(printf '%04x' "$((0x$current | 0x0020))")"
+  if setpci -s "$dev" "CAP_EXP+0x10.w=$desired" 2>/dev/null; then
+    log "PCIe Link-Retrain auf $dev getriggert"
+    sleep 2
+  else
+    warn "PCIe-Link-Retrain fehlgeschlagen auf $dev"
+  fi
+}
+
+tune_link_speed() {
+  set_link_target_speed "$LINK_DOWNSTREAM_PORT"
+  set_link_target_speed "$EGPU_PCI"
+  retrain_link "$LINK_DOWNSTREAM_PORT"
+  wait_for_device_responsive 10 || true
 }
 
 remove_device() {
@@ -386,12 +492,16 @@ main() {
   wait_for_tb_authorized || true
   sleep "$AUTH_SETTLE_SECS"
 
-  tune_root_port_completion_timeout
+  tune_pcie_stability
   controlled_rescan
+  tune_pcie_stability
+  tune_link_speed
 
   if ! manual_probe; then
     thunderbolt_reauth || true
     controlled_rescan
+    tune_pcie_stability
+    tune_link_speed
     manual_probe || true
   fi
 
