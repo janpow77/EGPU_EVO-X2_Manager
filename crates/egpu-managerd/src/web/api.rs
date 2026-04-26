@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::Severity;
+use crate::linux_control::{LinuxSysfsPcieControl, LinuxSysfsThunderboltControl};
 use crate::monitor::{GpuLease, LeaseTargetKind, acquire_gpu_lease, recommend_gpu_placement, release_gpu_lease};
 use crate::scheduler::{AdmissionState, GpuTarget};
 use crate::web::AppState;
@@ -1542,6 +1543,10 @@ pub async fn post_recovery_reset(
         .into_response();
     }
 
+    let cfg_owned = (**cfg).clone();
+    let db = state.db.clone();
+    let sse = state.sse.clone();
+
     state
         .db
         .log_event(
@@ -1560,10 +1565,33 @@ pub async fn post_recovery_reset(
             "stage": "flr_reset",
         })));
 
+    tokio::spawn(async move {
+        let pcie = LinuxSysfsPcieControl::default();
+        sse.send(BroadcastEvent::RecoveryStage(serde_json::json!({
+            "action": "manual_reset_started",
+            "stage": "flr_reset",
+        })));
+
+        match crate::recovery::run_manual_pcie_reset(&cfg_owned, db, &pcie).await {
+            Ok(()) => {
+                sse.send(BroadcastEvent::RecoveryStage(serde_json::json!({
+                    "action": "manual_reset_completed",
+                    "stage": "idle",
+                })));
+            }
+            Err(e) => {
+                sse.send(BroadcastEvent::RecoveryStage(serde_json::json!({
+                    "action": "manual_reset_failed",
+                    "stage": "flr_reset",
+                    "error": e.to_string(),
+                })));
+            }
+        }
+    });
+
     Json(serde_json::json!({
         "ok": true,
-        "message": "PCIe-Reset angefordert",
-        "note": "Reset wird vom Recovery-System ausgefuehrt"
+        "message": "PCIe-Reset gestartet"
     }))
     .into_response()
 }
@@ -1597,6 +1625,10 @@ pub async fn post_thunderbolt_reconnect(
         .into_response();
     }
 
+    let cfg_owned = (**cfg).clone();
+    let db = state.db.clone();
+    let sse = state.sse.clone();
+
     state
         .db
         .log_event(
@@ -1615,10 +1647,33 @@ pub async fn post_thunderbolt_reconnect(
             "stage": "tb_reauth",
         })));
 
+    tokio::spawn(async move {
+        let thunderbolt = LinuxSysfsThunderboltControl;
+        sse.send(BroadcastEvent::RecoveryStage(serde_json::json!({
+            "action": "thunderbolt_reconnect_started",
+            "stage": "tb_reauth",
+        })));
+
+        match crate::recovery::run_manual_thunderbolt_reconnect(&cfg_owned, db, &thunderbolt).await {
+            Ok(()) => {
+                sse.send(BroadcastEvent::RecoveryStage(serde_json::json!({
+                    "action": "thunderbolt_reconnect_completed",
+                    "stage": "idle",
+                })));
+            }
+            Err(e) => {
+                sse.send(BroadcastEvent::RecoveryStage(serde_json::json!({
+                    "action": "thunderbolt_reconnect_failed",
+                    "stage": "tb_reauth",
+                    "error": e.to_string(),
+                })));
+            }
+        }
+    });
+
     Json(serde_json::json!({
         "ok": true,
-        "message": "Thunderbolt-Reconnect angefordert",
-        "note": "Reauthorisierung wird vom Recovery-System ausgefuehrt"
+        "message": "Thunderbolt-Reconnect gestartet"
     }))
     .into_response()
 }

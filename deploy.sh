@@ -21,11 +21,15 @@ $SUDO chmod 755 /usr/local/bin/egpu-managerd
 echo "[3/5] Aktualisiere Config..."
 $SUDO cp config.toml /etc/egpu-manager/config.toml
 
-echo "[4/5] Aktualisiere Service..."
+echo "[4/5] Korrigiere Datenverzeichnis..."
+$SUDO mkdir -p /var/lib/egpu-manager
+$SUDO chown -R root:root /var/lib/egpu-manager
+
+echo "[5/6] Aktualisiere Service..."
 $SUDO cp egpu-managerd.service /etc/systemd/system/egpu-managerd.service
 $SUDO systemctl daemon-reload
 
-echo "[5/5] Starte Daemon..."
+echo "[6/6] Starte Daemon..."
 $SUDO systemctl start egpu-managerd
 sleep 3
 

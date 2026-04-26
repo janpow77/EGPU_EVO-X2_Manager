@@ -40,6 +40,50 @@ pub enum RebindResult {
     Failed(String),
 }
 
+const PCI_DRIVERS_AUTOPROBE_PATH: &str = "/sys/bus/pci/drivers_autoprobe";
+
+pub fn read_pci_drivers_autoprobe() -> Option<bool> {
+    std::fs::read_to_string(PCI_DRIVERS_AUTOPROBE_PATH)
+        .ok()
+        .map(|content| content.trim() != "0")
+}
+
+pub async fn set_pci_drivers_autoprobe(enabled: bool) -> std::io::Result<()> {
+    tokio::fs::write(PCI_DRIVERS_AUTOPROBE_PATH, if enabled { "1" } else { "0" }).await
+}
+
+pub async fn set_driver_override(pci_address: &str, value: &str) {
+    let override_path = format!("/sys/bus/pci/devices/{pci_address}/driver_override");
+    if Path::new(&override_path).exists()
+        && let Err(e) = tokio::fs::write(&override_path, value).await
+    {
+        warn!("driver_override={} fehlgeschlagen für {}: {}", value, pci_address, e);
+    }
+}
+
+pub async fn block_companion_audio_autobind(pci_address: &str) {
+    let Some(base) = pci_address.strip_suffix(".0") else {
+        return;
+    };
+    let audio_address = format!("{base}.1");
+    let audio_path = format!("/sys/bus/pci/devices/{audio_address}");
+    if !Path::new(&audio_path).exists() {
+        return;
+    }
+
+    let override_path = format!("{audio_path}/driver_override");
+    if Path::new(&override_path).exists() {
+        set_driver_override(&audio_address, "none").await;
+    }
+
+    let unbind_path = format!("{audio_path}/driver/unbind");
+    if Path::new(&unbind_path).exists()
+        && let Err(e) = tokio::fs::write(&unbind_path, &audio_address).await
+    {
+        warn!("Audio-Unbind fehlgeschlagen für {audio_address}: {e}");
+    }
+}
+
 /// Prüft ob die eGPU auf dem PCI-Bus existiert.
 pub fn is_pci_device_present(pci_address: &str) -> bool {
     Path::new(&format!("/sys/bus/pci/devices/{pci_address}/vendor")).exists()
@@ -96,6 +140,7 @@ async fn remove_and_rescan(pci_address: &str) -> RebindResult {
     info!("Ghost-Device {pci_address} erkannt (Config Space = 0xFF) — entferne und rescanne");
 
     // Schritt 1: Audio-Function ebenfalls entfernen (05:00.1)
+    block_companion_audio_autobind(pci_address).await;
     let audio_address = if pci_address.ends_with(".0") {
         Some(format!("{}.1", &pci_address[..pci_address.len() - 2]))
     } else {
@@ -153,6 +198,9 @@ async fn remove_and_rescan(pci_address: &str) -> RebindResult {
 
 /// Versucht nvidia direkt an ein erreichbares PCI-Device zu binden.
 async fn try_nvidia_bind(pci_address: &str) -> RebindResult {
+    prepare_device_for_bind(pci_address).await;
+    block_companion_audio_autobind(pci_address).await;
+
     // Falls ein anderer Treiber gebunden ist, erst unbinden
     let driver_link = format!("/sys/bus/pci/devices/{pci_address}/driver");
     if Path::new(&driver_link).exists() && !is_nvidia_driver_bound(pci_address) {
@@ -168,9 +216,7 @@ async fn try_nvidia_bind(pci_address: &str) -> RebindResult {
     // driver_override setzen
     let override_path = format!("/sys/bus/pci/devices/{pci_address}/driver_override");
     if Path::new(&override_path).exists() {
-        if let Err(e) = tokio::fs::write(&override_path, "nvidia").await {
-            warn!("driver_override schreiben fehlgeschlagen: {e}");
-        }
+        set_driver_override(pci_address, "nvidia").await;
     }
 
     // Direktes Bind
@@ -208,6 +254,32 @@ async fn try_nvidia_bind(pci_address: &str) -> RebindResult {
         Err(e) => {
             error!("PCI-Rescan fehlgeschlagen: {e}");
             RebindResult::Failed(format!("bind und rescan fehlgeschlagen: {e}"))
+        }
+    }
+}
+
+async fn prepare_device_for_bind(pci_address: &str) {
+    let device_path = format!("/sys/bus/pci/devices/{pci_address}");
+
+    let power_control = format!("{device_path}/power/control");
+    if Path::new(&power_control).exists()
+        && let Err(e) = tokio::fs::write(&power_control, "on").await
+    {
+        warn!("power/control=on fehlgeschlagen für {pci_address}: {e}");
+    }
+
+    let enable_path = format!("{device_path}/enable");
+    if Path::new(&enable_path).exists() {
+        match std::fs::read_to_string(&enable_path) {
+            Ok(content) if content.trim() == "0" => {
+                if let Err(e) = tokio::fs::write(&enable_path, "1").await {
+                    warn!("enable=1 fehlgeschlagen für {pci_address}: {e}");
+                } else {
+                    debug!("PCI-Device {pci_address} via enable=1 aktiviert");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => warn!("enable-State nicht lesbar für {pci_address}: {e}"),
         }
     }
 }

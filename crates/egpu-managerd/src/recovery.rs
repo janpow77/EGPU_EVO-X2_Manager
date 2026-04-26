@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
 use crate::db::{EventDb, RecoveryState, Severity};
+use crate::driver_rebind;
+use crate::nvidia::GpuMonitorBackend;
 
 /// Recovery stages in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -396,39 +398,36 @@ impl RecoveryStateMachine {
             }
         };
 
-        match pcie.function_level_reset(&config.gpu.egpu_pci_address).await {
+        let original_autoprobe = arm_controlled_probe_guard(&config.gpu.egpu_pci_address).await;
+
+        let stage_result = match pcie.function_level_reset(&config.gpu.egpu_pci_address).await {
             Ok(()) => {
                 info!("PCIe FLR erfolgreich für {}", config.gpu.egpu_pci_address);
-                // Readiness-Polling: nvidia-smi kann nach FLR einige Sekunden brauchen
-                const FLR_RETRIES: u32 = 6;
-                const FLR_RETRY_DELAY: Duration = Duration::from_secs(2);
-                for attempt in 1..=FLR_RETRIES {
-                    tokio::time::sleep(FLR_RETRY_DELAY).await;
-                    if check_nvidia_smi_available().await {
-                        info!(
-                            "nvidia-smi nach FLR erreichbar (Versuch {}/{})",
-                            attempt, FLR_RETRIES
-                        );
-                        return Ok(StageResult::Success);
-                    }
+                if wait_for_egpu_ready(config, Duration::from_secs(20)).await {
                     info!(
-                        "nvidia-smi nach FLR noch nicht erreichbar (Versuch {}/{})",
-                        attempt, FLR_RETRIES
+                        "eGPU {} nach FLR wieder sichtbar",
+                        config.gpu.egpu_pci_address
                     );
+                    return Ok(StageResult::Success);
                 }
+
                 warn!(
-                    "nvidia-smi nach FLR nicht erreichbar nach {} Versuchen",
-                    FLR_RETRIES
+                    "eGPU {} nach FLR nicht wieder sichtbar",
+                    config.gpu.egpu_pci_address
                 );
-                Ok(StageResult::Failed(
-                    "nvidia-smi nach FLR nicht erreichbar (alle Retries erschoepft)".to_string(),
-                ))
+                Ok(StageResult::Failed(format!(
+                    "eGPU {} nach FLR nicht wieder sichtbar",
+                    config.gpu.egpu_pci_address
+                )))
             }
             Err(e) => {
                 warn!("PCIe FLR fehlgeschlagen: {}", e);
                 Ok(StageResult::Failed(format!("PCIe FLR fehlgeschlagen: {e}")))
             }
-        }
+        };
+
+        restore_controlled_probe_guard(original_autoprobe).await;
+        stage_result
     }
 
     /// Stage 2: Generate per-service override files, recreate containers with fallback GPU.
@@ -545,10 +544,13 @@ impl RecoveryStateMachine {
             }
         };
 
+        let original_autoprobe = arm_controlled_probe_guard(&config.gpu.egpu_pci_address).await;
+
         // Deauthorize
         info!("Thunderbolt deauthorize: {}", tb_config.device_path);
         if let Err(e) = thunderbolt.deauthorize(&tb_config.device_path).await {
             warn!("Thunderbolt deauth fehlgeschlagen: {}", e);
+            restore_controlled_probe_guard(original_autoprobe).await;
             return Ok(StageResult::Failed(format!(
                 "Thunderbolt deauth fehlgeschlagen: {e}"
             )));
@@ -561,47 +563,22 @@ impl RecoveryStateMachine {
         info!("Thunderbolt reauthorize: {}", tb_config.device_path);
         if let Err(e) = thunderbolt.authorize(&tb_config.device_path).await {
             warn!("Thunderbolt reauth fehlgeschlagen: {}", e);
+            restore_controlled_probe_guard(original_autoprobe).await;
             return Ok(StageResult::Failed(format!(
                 "Thunderbolt reauth fehlgeschlagen: {e}"
             )));
         }
 
-        // Readiness-Polling: Warte auf PCI-Device-Wiedererscheinen via sysfs
-        let pci_vendor_path = format!(
-            "/sys/bus/pci/devices/{}/vendor",
-            config.gpu.egpu_pci_address
-        );
-        const TB_POLL_INTERVAL: Duration = Duration::from_millis(500);
-        const TB_POLL_DEADLINE: Duration = Duration::from_secs(15);
-        let poll_start = tokio::time::Instant::now();
-        let mut pci_device_found = false;
-
-        info!(
-            "Warte auf PCI-Device {} (Deadline: {}s)",
-            config.gpu.egpu_pci_address,
-            TB_POLL_DEADLINE.as_secs()
-        );
-        while poll_start.elapsed() < TB_POLL_DEADLINE {
-            if tokio::fs::metadata(&pci_vendor_path).await.is_ok() {
-                info!(
-                    "PCI-Device {} in sysfs gefunden nach {:.1}s",
-                    config.gpu.egpu_pci_address,
-                    poll_start.elapsed().as_secs_f64()
-                );
-                pci_device_found = true;
-                break;
-            }
-            tokio::time::sleep(TB_POLL_INTERVAL).await;
-        }
-
-        if !pci_device_found {
+        if !wait_for_pci_device_responsive(&config.gpu.egpu_pci_address, Duration::from_secs(15))
+            .await
+        {
             warn!(
-                "PCI-Device {} nach {}s nicht in sysfs erschienen",
+                "PCI-Device {} nach Thunderbolt-Reconnect nicht responsiv",
                 config.gpu.egpu_pci_address,
-                TB_POLL_DEADLINE.as_secs()
             );
+            restore_controlled_probe_guard(original_autoprobe).await;
             return Ok(StageResult::Failed(format!(
-                "PCI-Device {} nach Thunderbolt-Reconnect nicht erschienen",
+                "PCI-Device {} nach Thunderbolt-Reconnect nicht responsiv",
                 config.gpu.egpu_pci_address
             )));
         }
@@ -612,38 +589,34 @@ impl RecoveryStateMachine {
                 info!("Thunderbolt-Gerät erfolgreich re-autorisiert");
             }
             Ok(false) => {
+                restore_controlled_probe_guard(original_autoprobe).await;
                 return Ok(StageResult::Failed(
                     "Thunderbolt-Gerät nicht autorisiert nach Reconnect".to_string(),
                 ));
             }
             Err(e) => {
+                restore_controlled_probe_guard(original_autoprobe).await;
                 return Ok(StageResult::Failed(format!(
                     "Thunderbolt-Status nicht lesbar: {e}"
                 )));
             }
         }
 
-        // nvidia-smi Readiness-Polling (PCI-Device da, aber Treiber braucht noch)
-        const TB_SMI_RETRIES: u32 = 3;
-        const TB_SMI_RETRY_DELAY: Duration = Duration::from_secs(2);
-        for attempt in 1..=TB_SMI_RETRIES {
-            tokio::time::sleep(TB_SMI_RETRY_DELAY).await;
-            if check_nvidia_smi_available().await {
-                info!(
-                    "nvidia-smi nach Thunderbolt-Reconnect erreichbar (Versuch {}/{})",
-                    attempt, TB_SMI_RETRIES
-                );
-                return Ok(StageResult::Success);
-            }
+        if wait_for_egpu_ready(config, Duration::from_secs(20)).await {
             info!(
-                "nvidia-smi nach Thunderbolt-Reconnect noch nicht erreichbar (Versuch {}/{})",
-                attempt, TB_SMI_RETRIES
+                "eGPU {} nach Thunderbolt-Reconnect wieder sichtbar",
+                config.gpu.egpu_pci_address
             );
+            restore_controlled_probe_guard(original_autoprobe).await;
+            return Ok(StageResult::Success);
         }
 
+        restore_controlled_probe_guard(original_autoprobe).await;
         Ok(StageResult::Failed(
-            "nvidia-smi nach Thunderbolt-Reconnect nicht erreichbar (alle Retries erschoepft)"
-                .to_string(),
+            format!(
+                "eGPU {} nach Thunderbolt-Reconnect nicht wieder sichtbar",
+                config.gpu.egpu_pci_address
+            ),
         ))
     }
 
@@ -762,6 +735,79 @@ impl RecoveryStateMachine {
     }
 }
 
+pub async fn run_manual_pcie_reset(
+    config: &Config,
+    db: EventDb,
+    pcie: &dyn PcieControl,
+) -> anyhow::Result<()> {
+    let rsm = RecoveryStateMachine::new(db.clone(), config.recovery.reset_cooldown_seconds);
+    match rsm.execute_pcie_reset(config, Some(pcie)).await? {
+        StageResult::Success => {
+            db.log_event(
+                "recovery.manual_pcie_reset",
+                Severity::Info,
+                "Manueller PCIe-Reset erfolgreich",
+                None,
+            )
+            .await
+            .ok();
+            Ok(())
+        }
+        StageResult::Failed(reason) => {
+            db.log_event(
+                "recovery.manual_pcie_reset",
+                Severity::Error,
+                &format!("Manueller PCIe-Reset fehlgeschlagen: {reason}"),
+                None,
+            )
+            .await
+            .ok();
+            anyhow::bail!(reason)
+        }
+        StageResult::AdvanceToNext => {
+            anyhow::bail!("Manueller PCIe-Reset erfordert weitere Recovery-Stages")
+        }
+    }
+}
+
+pub async fn run_manual_thunderbolt_reconnect(
+    config: &Config,
+    db: EventDb,
+    thunderbolt: &dyn ThunderboltControl,
+) -> anyhow::Result<()> {
+    let rsm = RecoveryStateMachine::new(db.clone(), config.recovery.reset_cooldown_seconds);
+    match rsm
+        .execute_thunderbolt_reconnect(config, Some(thunderbolt))
+        .await?
+    {
+        StageResult::Success => {
+            db.log_event(
+                "recovery.manual_thunderbolt",
+                Severity::Info,
+                "Manueller Thunderbolt-Reconnect erfolgreich",
+                None,
+            )
+            .await
+            .ok();
+            Ok(())
+        }
+        StageResult::Failed(reason) => {
+            db.log_event(
+                "recovery.manual_thunderbolt",
+                Severity::Error,
+                &format!("Manueller Thunderbolt-Reconnect fehlgeschlagen: {reason}"),
+                None,
+            )
+            .await
+            .ok();
+            anyhow::bail!(reason)
+        }
+        StageResult::AdvanceToNext => {
+            anyhow::bail!("Manueller Thunderbolt-Reconnect erfordert weitere Recovery-Stages")
+        }
+    }
+}
+
 /// Generate override path mit explizitem override_dir.
 pub fn generate_override_path_with_dir(
     compose_file: &str,
@@ -807,20 +853,72 @@ services:
     )
 }
 
-/// Check if nvidia-smi is available (quick health check).
-async fn check_nvidia_smi_available() -> bool {
-    use tokio::process::Command;
-    match tokio::time::timeout(Duration::from_secs(5), async {
-        Command::new("nvidia-smi")
-            .arg("--query-gpu=name")
-            .arg("--format=csv,noheader")
-            .output()
-            .await
-    })
-    .await
+async fn wait_for_pci_device_responsive(pci_address: &str, timeout: Duration) -> bool {
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < timeout {
+        if driver_rebind::is_pci_device_present(pci_address)
+            && driver_rebind::is_device_responsive(pci_address)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
+}
+
+async fn wait_for_egpu_ready(config: &Config, timeout: Duration) -> bool {
+    let start = tokio::time::Instant::now();
+    let mut gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
+    let mut last_rebind_attempt: Option<tokio::time::Instant> = None;
+
+    while start.elapsed() < timeout {
+        let pci_address = &config.gpu.egpu_pci_address;
+
+        if driver_rebind::is_pci_device_present(pci_address)
+            && driver_rebind::is_device_responsive(pci_address)
+            && !driver_rebind::is_nvidia_driver_bound(pci_address)
+            && last_rebind_attempt
+                .map(|instant| instant.elapsed() >= Duration::from_secs(2))
+                .unwrap_or(true)
+        {
+            last_rebind_attempt = Some(tokio::time::Instant::now());
+            driver_rebind::block_companion_audio_autobind(pci_address).await;
+            let result = driver_rebind::try_rebind_nvidia(pci_address).await;
+            info!("Recovery-Rebind für {}: {:?}", pci_address, result);
+        }
+
+        if let Ok(gpus) = gpu_monitor.query_all().await {
+            if gpus
+                .iter()
+                .any(|gpu| gpu.pci_address == config.gpu.egpu_pci_address)
+            {
+                return true;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    false
+}
+
+async fn arm_controlled_probe_guard(pci_address: &str) -> Option<bool> {
+    let original_autoprobe = driver_rebind::read_pci_drivers_autoprobe();
+    if original_autoprobe.is_some()
+        && let Err(e) = driver_rebind::set_pci_drivers_autoprobe(false).await
     {
-        Ok(Ok(output)) => output.status.success(),
-        _ => false,
+        warn!("drivers_autoprobe=0 fehlgeschlagen: {e}");
+    }
+    driver_rebind::set_driver_override(pci_address, "none").await;
+    driver_rebind::block_companion_audio_autobind(pci_address).await;
+    original_autoprobe
+}
+
+async fn restore_controlled_probe_guard(original_autoprobe: Option<bool>) {
+    if let Some(enabled) = original_autoprobe
+        && let Err(e) = driver_rebind::set_pci_drivers_autoprobe(enabled).await
+    {
+        warn!("drivers_autoprobe Wiederherstellung fehlgeschlagen: {e}");
     }
 }
 

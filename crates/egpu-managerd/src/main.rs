@@ -5,6 +5,7 @@ mod driver_rebind;
 mod health_score;
 mod kmsg;
 mod link_health;
+mod linux_control;
 mod llm;
 mod monitor;
 #[allow(dead_code)] // NVML-Validierung vorbereitet, nicht integriert
@@ -383,13 +384,20 @@ async fn main() -> anyhow::Result<()> {
     let db = EventDb::open(db_path)?;
     info!("Event-Datenbank geoeffnet: {}", config.database.db_path);
 
-    db.log_event(
-        "daemon.start",
-        db::Severity::Info,
-        &format!("egpu-managerd v{} gestartet", env!("CARGO_PKG_VERSION")),
-        None,
-    )
-    .await?;
+    if let Err(e) = db
+        .log_event(
+            "daemon.start",
+            db::Severity::Info,
+            &format!("egpu-managerd v{} gestartet", env!("CARGO_PKG_VERSION")),
+            None,
+        )
+        .await
+    {
+        warn!(
+            "Startup-Event nicht persistierbar (DB evtl. readonly bei {}): {e}",
+            config.database.db_path
+        );
+    }
 
     // Check for interrupted recovery — always discard on daemon restart.
     // A daemon restart (systemd, manual) is itself a reset. If nvidia-smi works

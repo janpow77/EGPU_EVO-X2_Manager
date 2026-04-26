@@ -18,6 +18,7 @@ use crate::docker::DockerComposeControl;
 use crate::health_score::{HealthEventKind, LinkHealthScore};
 use crate::kmsg::KmsgMonitor;
 use crate::link_health::LinkHealthWatcher;
+use crate::linux_control::{LinuxSysfsPcieControl, LinuxSysfsThunderboltControl};
 use crate::nvidia::GpuMonitorBackend;
 use crate::recovery::{RecoveryStateMachine, get_egpu_pipelines};
 use crate::scheduler::{AdmissionState, GpuCapacity, GpuTarget, ScheduleRequest, VramScheduler};
@@ -1466,13 +1467,16 @@ impl MonitorOrchestrator {
         let mut gpu_monitor = GpuMonitorBackend::new(config.gpu.nvidia_smi_timeout_seconds);
         let start = std::time::Instant::now();
         match gpu_monitor.query_all().await {
-            Ok(_) => {
+            Ok(gpus) => {
                 let response_ms = start.elapsed().as_millis();
                 let threshold = config.gpu.nvidia_smi_slow_threshold_ms as u128;
+                let egpu_visible = gpus
+                    .iter()
+                    .any(|gpu| gpu.pci_address == config.gpu.egpu_pci_address);
 
-                if response_ms < threshold {
+                if egpu_visible && response_ms < threshold {
                     info!(
-                        "Druckreduktion erfolgreich: GPU antwortet in {}ms (< {}ms)",
+                        "Druckreduktion erfolgreich: eGPU antwortet in {}ms (< {}ms)",
                         response_ms, threshold
                     );
 
@@ -1493,8 +1497,8 @@ impl MonitorOrchestrator {
                 }
 
                 warn!(
-                    "Druckreduktion nicht ausreichend: nvidia-smi {}ms >= {}ms",
-                    response_ms, threshold
+                    "Druckreduktion nicht ausreichend: egpu_visible={}, response={}ms, threshold={}ms",
+                    egpu_visible, response_ms, threshold
                 );
             }
             Err(e) => {
@@ -1604,6 +1608,8 @@ impl MonitorOrchestrator {
             config.docker.container_restart_timeout_seconds,
             config.docker.container_stop_timeout_seconds,
         );
+        let pcie_ctl = LinuxSysfsPcieControl::default();
+        let thunderbolt_ctl = LinuxSysfsThunderboltControl;
 
         let mut rsm = RecoveryStateMachine::new(db.clone(), config.recovery.reset_cooldown_seconds);
 
@@ -1614,7 +1620,10 @@ impl MonitorOrchestrator {
             return;
         }
 
-        match rsm.run_recovery(&config, &docker_ctl, None, None).await {
+        match rsm
+            .run_recovery(&config, &docker_ctl, Some(&pcie_ctl), Some(&thunderbolt_ctl))
+            .await
+        {
             Ok(()) => {
                 info!("Recovery abgeschlossen");
                 if let Some(ref sse) = sse {

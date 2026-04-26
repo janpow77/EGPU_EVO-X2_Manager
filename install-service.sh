@@ -46,7 +46,7 @@ fi
 # 3. Datenbank-Verzeichnis
 echo "[3/5] Datenbank-Verzeichnis erstellen..."
 sudo mkdir -p /var/lib/egpu-manager
-sudo chown root:root /var/lib/egpu-manager
+sudo chown -R root:root /var/lib/egpu-manager
 
 # 4. systemd-Service
 echo "[4/5] systemd-Service installieren..."
