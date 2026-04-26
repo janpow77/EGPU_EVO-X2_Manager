@@ -625,9 +625,17 @@ fn build_tab_ollama(state: &WidgetState) -> ScrolledWindow {
 
                     card.pack_start(&header, false, false, 0);
 
+                    // AMD APU (RDNA 3.5) hat kein dediziertes VRAM — was Ollama als
+                    // size_vram meldet, liegt physisch im RAM via GTT (shared).
+                    // Beschriftung entsprechend: "GTT" statt "VRAM".
+                    let processor = if model.processor.is_empty() {
+                        "GPU".to_string()
+                    } else {
+                        model.processor.clone()
+                    };
                     let detail = format!(
-                        "{:.1} GB total \u{2022} {:.1} GB VRAM \u{2022} {}",
-                        model.size_gb, model.vram_gb, model.processor
+                        "{:.1} GB total \u{2022} {:.1} GB GTT \u{2022} {}",
+                        model.size_gb, model.vram_gb, processor
                     );
                     let detail_lbl = Label::new(Some(&detail));
                     detail_lbl.style_context().add_class("model-detail");

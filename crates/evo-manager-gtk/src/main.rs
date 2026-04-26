@@ -99,9 +99,11 @@ fn main() {
                     }
                 }
 
-                // Popup nur wenn sichtbar
+                // Popup nur wenn sichtbar UND nicht aktiv (User interagiert nicht gerade
+                // damit). Verhindert Tab-Springen und Scroll-Verlust waehrend Bedienung.
+                // Sobald Fokus weg ist (Klick anderswo), kommen Updates wieder.
                 let win = popup_update.borrow();
-                if win.is_visible() {
+                if win.is_visible() && !win.is_active() {
                     popup::update_popup(&win, &state);
                 }
 

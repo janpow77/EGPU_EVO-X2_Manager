@@ -302,10 +302,24 @@ fn read_gpu_info() -> GpuInfo {
     if let Ok(entries) = std::fs::read_dir(drm_dir) {
         for entry in entries.flatten() {
             let dev = entry.path().join("device");
-            // GPU-Auslastung
+            // GPU-Auslastung: gpu_busy_percent ist ein instantaner Snapshot.
+            // Bei Ollama-Inference liefert ein einzelner Read fast immer 100% (oder 0%).
+            // Wir samplen 8x ueber ~80ms und mitteln, damit der Wert repraesentativ ist.
             if util.is_none() {
-                if let Some(v) = read_sysfs_u64(dev.join("gpu_busy_percent").to_str().unwrap_or_default()) {
-                    util = Some(v as u32);
+                let path = dev.join("gpu_busy_percent");
+                let path_str = path.to_str().unwrap_or_default();
+                if std::path::Path::new(path_str).exists() {
+                    let mut samples = Vec::with_capacity(8);
+                    for _ in 0..8 {
+                        if let Some(v) = read_sysfs_u64(path_str) {
+                            samples.push(v);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    if !samples.is_empty() {
+                        let avg = samples.iter().sum::<u64>() / samples.len() as u64;
+                        util = Some(avg as u32);
+                    }
                 }
             }
             // Temperatur via hwmon
