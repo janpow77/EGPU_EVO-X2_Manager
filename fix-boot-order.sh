@@ -54,7 +54,7 @@ cp "$GRUB_FILE" "${GRUB_FILE}.bak.$(date +%Y%m%d%H%M%S)"
 # NICHT enthalten:
 #   pci=noacs         — UNGÜLTIG auf stock-Kernel ("Unknown option")
 #   pcie_acs_override — braucht gepatchten Kernel
-NEW_PARAMS="iommu=pt pcie_aspm=off pcie_port_pm=off pci=realloc,assign-busses"
+NEW_PARAMS="iommu=pt pcie_aspm=off pcie_port_pm=off pci=realloc,assign-busses,hpbridge=16"
 
 sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"${NEW_PARAMS}\"|" "$GRUB_FILE"
 log "  Parameter: ${NEW_PARAMS}"
@@ -83,85 +83,13 @@ log "  /etc/modprobe.d/egpu-nvidia-defer.conf erstellt"
 log "3/6: egpu-gpu-init.service (TB-Link warten → nvidia laden)..."
 
 EGPU_PCI="0000:05:00.0"
-
-# --- Externes Init-Script (kein Escaping-Problem in systemd) ---
-cat > /usr/local/bin/egpu-gpu-init.sh << 'SCRIPT'
-#!/bin/bash
-# eGPU GPU Init: Thunderbolt-Authorization abwarten, dann nvidia laden.
-set -euo pipefail
-
-EGPU_PCI="0000:05:00.0"
-TB_DEVICE="0-3"
-MAX_WAIT=60
-
-echo "=== eGPU GPU Init ==="
-echo "Warte auf Thunderbolt-Link fuer eGPU ($EGPU_PCI)..."
-
-waited=0
-while [ $waited -lt $MAX_WAIT ]; do
-    if [ -d "/sys/bus/pci/devices/$EGPU_PCI" ]; then
-        VENDOR=$(cat /sys/bus/pci/devices/$EGPU_PCI/vendor 2>/dev/null || echo "0xffff")
-        if [ "$VENDOR" != "0xffff" ]; then
-            echo "PCI-Device erreichbar (vendor=$VENDOR) nach ${waited}s"
-
-            # KRITISCH: Auf Thunderbolt-Authorization warten!
-            # bolt.service autorisiert async — vendor=0x10de heisst NICHT
-            # dass der Datenpfad steht. Ohne diese Pruefung: nvidia probe failed.
-            echo "Warte auf Thunderbolt-Authorization..."
-            tb_wait=0
-            while [ $tb_wait -lt 30 ]; do
-                TB_AUTH=$(cat /sys/bus/thunderbolt/devices/$TB_DEVICE/authorized 2>/dev/null || echo "0")
-                if [ "$TB_AUTH" = "1" ]; then
-                    echo "Thunderbolt authorized nach ${tb_wait}s"
-                    break
-                fi
-                sleep 1
-                tb_wait=$((tb_wait + 1))
-            done
-
-            if [ "$TB_AUTH" != "1" ]; then
-                echo "WARNUNG: Thunderbolt-Authorization Timeout (30s) — versuche trotzdem"
-            fi
-
-            # Post-Authorization Settle: PCIe-Link muss vollstaendig trainiert sein
-            echo "Post-Authorization Settle (3s)..."
-            sleep 3
-            break
-        fi
-
-        echo "Ghost-Device (vendor=0xffff) — entferne und rescanne..."
-        echo 1 > /sys/bus/pci/devices/$EGPU_PCI/remove 2>/dev/null || true
-        sleep 2
-        echo 1 > /sys/bus/pci/rescan
-        sleep 3
-        waited=$((waited + 5))
-        continue
-    fi
-    sleep 2
-    waited=$((waited + 2))
-done
-
-if [ ! -d "/sys/bus/pci/devices/$EGPU_PCI" ]; then
-    echo "PCI-Rescan..."
-    echo 1 > /sys/bus/pci/rescan
-    sleep 5
-fi
-
-echo "Lade nvidia-Module..."
-modprobe nvidia
-modprobe nvidia_uvm
-modprobe nvidia_drm modeset=1
-sleep 2
-
-if [ -c /dev/nvidia0 ]; then
-    GPU_COUNT=$(ls /dev/nvidia[0-9]* 2>/dev/null | wc -l)
-    echo "nvidia bereit: $GPU_COUNT GPU(s) verfuegbar"
-else
-    echo "WARNUNG: /dev/nvidia0 nicht da — nvidia-Probe vermutlich fehlgeschlagen"
+SCRIPT_SOURCE="$(cd "$(dirname "$0")" && pwd)/scripts/egpu-gpu-init.sh"
+if [ ! -f "$SCRIPT_SOURCE" ]; then
+    err "Fehlt: $SCRIPT_SOURCE"
     exit 1
 fi
-SCRIPT
-chmod +x /usr/local/bin/egpu-gpu-init.sh
+install -m 755 "$SCRIPT_SOURCE" /usr/local/bin/egpu-gpu-init.sh
+log "  /usr/local/bin/egpu-gpu-init.sh aktualisiert"
 
 # --- systemd Unit (ruft externes Script auf) ---
 cat > /etc/systemd/system/egpu-gpu-init.service << 'UNIT'
@@ -174,8 +102,9 @@ ConditionPathExists=/sys/bus/thunderbolt
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
+RemainAfterExit=no
 ExecStart=/usr/local/bin/egpu-gpu-init.sh
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target
@@ -187,7 +116,14 @@ log "  egpu-gpu-init.service erstellt"
 log "4/6: udev-Regel fuer eGPU Hot-Plug..."
 
 cat > /etc/udev/rules.d/99-egpu-thunderbolt.rules << 'UDEV'
-# Wenn die eGPU (RTX 5070 Ti) auf dem Bus erscheint, nvidia-Module laden
+# Wenn das Razer Core X V2 erscheint, PCIe-Tunnel rescannen und nvidia probe starten.
+# Wichtig: Die PCI-Funktion 0000:05:00.0 existiert in Fehlerfaellen noch nicht.
+ACTION=="add", SUBSYSTEM=="thunderbolt", KERNEL=="0-3", ATTR{unique_id}=="8ab48780-00c3-eba8-ffff-ffffffffffff", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="egpu-gpu-init.service"
+ACTION=="change", SUBSYSTEM=="thunderbolt", KERNEL=="0-3", ATTR{unique_id}=="8ab48780-00c3-eba8-ffff-ffffffffffff", \
+    TAG+="systemd", ENV{SYSTEMD_WANTS}+="egpu-gpu-init.service"
+
+# Fallback: Wenn die GPU-Funktion bereits auf dem PCI-Bus erscheint, ebenfalls initialisieren.
 ACTION=="add", SUBSYSTEM=="pci", KERNEL=="0000:05:00.0", ATTR{vendor}=="0x10de", \
     TAG+="systemd", ENV{SYSTEMD_WANTS}+="egpu-gpu-init.service"
 UDEV
@@ -219,7 +155,7 @@ StandardError=journal
 SyslogIdentifier=egpu-managerd
 Environment=RUST_LOG=info
 ProtectSystem=strict
-ReadWritePaths=/var/lib/egpu-manager /etc/egpu-manager
+ReadWritePaths=/var/lib/egpu-manager /etc/egpu-manager /sys/bus/pci /sys/bus/thunderbolt
 ProtectHome=read-only
 PrivateTmp=false
 NoNewPrivileges=yes

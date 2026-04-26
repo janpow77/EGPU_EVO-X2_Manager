@@ -1,12 +1,12 @@
 [Unit]
 Description=eGPU Manager Daemon (Rust)
 Documentation=file:///home/janpow/Projekte/egpu/egpu-manager-spezifikation.md
-After=network.target nvidia-persistenced.service egpu-stabilize.service
-Wants=egpu-stabilize.service
-ConditionPathExists=/sys/bus/pci/devices/0000:05:00.0
+After=network.target bolt.service nvidia-persistenced.service egpu-gpu-init.service
+Wants=egpu-gpu-init.service
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sleep 3
 ExecStart=/usr/local/bin/egpu-managerd --config /etc/egpu-manager/config.toml
 Restart=on-failure
 RestartSec=10
@@ -27,7 +27,7 @@ Environment=RUST_LOG=info
 
 # Security hardening
 ProtectSystem=strict
-ReadWritePaths=/var/lib/egpu-manager /etc/egpu-manager
+ReadWritePaths=/var/lib/egpu-manager /etc/egpu-manager /sys/bus/pci /sys/bus/thunderbolt
 ProtectHome=read-only
 PrivateTmp=false
 NoNewPrivileges=yes
