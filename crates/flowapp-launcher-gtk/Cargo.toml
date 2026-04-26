@@ -1,11 +1,11 @@
 [package]
-name = "flowaudit-launcher-gtk"
+name = "flowapp-launcher-gtk"
 version.workspace = true
 edition.workspace = true
-description = "GTK Tray Widget fuer FlowAudit App Launcher"
+description = "GTK Tray Widget fuer FlowApp Launcher"
 
 [[bin]]
-name = "flowaudit-launcher-widget"
+name = "flowapp-launcher-widget"
 path = "src/main.rs"
 
 [dependencies]

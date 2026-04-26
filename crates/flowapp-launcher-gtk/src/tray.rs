@@ -11,7 +11,7 @@ use crate::apps::{self, App, icon_for};
 use crate::editor;
 use crate::launcher;
 
-const ICON_NAME: &str = "flowaudit-launcher";
+const ICON_NAME: &str = "flowapp-launcher";
 
 pub struct Tray {
     indicator: Rc<RefCell<AppIndicator>>,
@@ -30,7 +30,7 @@ fn install_icon(source_dir: &std::path::Path) -> Option<PathBuf> {
                 .unwrap_or_else(|| PathBuf::from("/tmp"))
                 .join(".local/share")
         });
-    let icon_dir = base.join("icons").join("flowaudit-launcher");
+    let icon_dir = base.join("icons").join("flowapp-launcher");
     std::fs::create_dir_all(&icon_dir).ok()?;
     let target = icon_dir.join(format!("{ICON_NAME}.png"));
     std::fs::copy(&source, &target).ok()?;

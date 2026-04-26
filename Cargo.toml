@@ -8,8 +8,7 @@ members = [
     "crates/egpu-manager-gtk",
     "crates/evo-manager-gtk",
     "crates/evo-x2-services",
-    "crates/vpn-router",
-    "crates/flowaudit-launcher-gtk",
+    "crates/flowapp-launcher-gtk",
 ]
 
 [workspace.package]
