@@ -12,6 +12,7 @@ use crate::state::{ConnectionState, WidgetState};
 
 thread_local! {
     static ACTIVE_TAB: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+    static TAB_LOCK: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 }
 
 const CSS: &str = r#"
@@ -207,12 +208,21 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
     status_box.pack_start(&status_lbl, false, false, 0);
 
     if let Some(ref m) = state.metrics {
-        let gtt_text = format!("GTT: {:.0}/{:.0} GB", m.gtt.used_gb, m.gtt.total_gb);
-        let gtt_lbl = Label::new(Some(&gtt_text));
-        gtt_lbl.style_context().add_class("muted");
-        gtt_lbl.set_halign(Align::End);
-        gtt_lbl.set_hexpand(true);
-        status_box.pack_start(&gtt_lbl, true, true, 0);
+        // Berechne Summe der Modell-VRAMs
+        let model_vram: f64 = m.ollama.as_ref()
+            .map(|o| o.running_models.iter().map(|m| m.vram_gb).sum())
+            .unwrap_or(0.0);
+
+        let mem_text = if model_vram > 0.0 {
+            format!("Models: {:.1} GB • GTT: {:.0}/{:.0} GB", model_vram, m.gtt.used_gb, m.gtt.total_gb)
+        } else {
+            format!("GTT: {:.0}/{:.0} GB", m.gtt.used_gb, m.gtt.total_gb)
+        };
+        let mem_lbl = Label::new(Some(&mem_text));
+        mem_lbl.style_context().add_class("muted");
+        mem_lbl.set_halign(Align::End);
+        mem_lbl.set_hexpand(true);
+        status_box.pack_start(&mem_lbl, true, true, 0);
     }
 
     outer.pack_start(&status_box, false, false, 0);
@@ -249,22 +259,19 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
     }
 
     notebook.set_vexpand(true);
-    // Wichtig: Erst current_page setzen, DANN Signal verbinden.
-    // append_page triggert intern switch_page mit Seite 0 — das darf
-    // ACTIVE_TAB nicht überschreiben.
-    notebook.set_current_page(Some(saved_tab));
-    let restored_tab = saved_tab;
-    // Signal blockiert kurz: erst nach show_all aktiv, damit GTK
-    // keine spurious switch_page Events den gespeicherten Tab killen.
-    let inhibit = std::rc::Rc::new(std::cell::Cell::new(true));
-    let inhibit_clone = inhibit.clone();
+
+    // Tab-Wechsel-Signal: Nutze globales TAB_LOCK statt lokales inhibit
     notebook.connect_switch_page(move |_, _, page_num| {
-        if !inhibit_clone.get() {
-            ACTIVE_TAB.with(|t| t.set(page_num));
-        }
+        TAB_LOCK.with(|lock| {
+            if !lock.get() {
+                ACTIVE_TAB.with(|t| t.set(page_num));
+            }
+        });
     });
-    // Nochmal sicherstellen nach Signal-Verbindung
-    notebook.set_current_page(Some(restored_tab));
+
+    // Tab wiederherstellen mit aktiviertem Lock (verhindert Race-Conditions)
+    TAB_LOCK.with(|lock| lock.set(true));
+    notebook.set_current_page(Some(saved_tab));
 
     outer.pack_start(&notebook, true, true, 0);
 
@@ -361,8 +368,11 @@ pub fn update_popup(window: &Window, state: &WidgetState) {
 
     window.add(&outer);
     window.show_all();
-    // Jetzt Signal freigeben — GTK hat alle spurious switch_page Events gefeuert
-    inhibit.set(false);
+
+    // Lock freigeben NACH show_all, wenn alle GTK-internen Events abgearbeitet sind
+    glib::idle_add_local_once(move || {
+        TAB_LOCK.with(|lock| lock.set(false));
+    });
 }
 
 // ── Tab 1: Services ──
@@ -462,8 +472,20 @@ fn build_tab_resources(state: &WidgetState) -> ScrolledWindow {
     content.set_margin_top(8);
 
     if let Some(ref m) = state.metrics {
-        // GTT
-        content.pack_start(&build_resource_bar("GTT Speicher", m.gtt.used_gb, m.gtt.total_gb, "GB",
+        // Modell-VRAM (Summe der geladenen Modelle)
+        let model_vram: f64 = m.ollama.as_ref()
+            .map(|o| o.running_models.iter().map(|mod_| mod_.vram_gb).sum())
+            .unwrap_or(0.0);
+
+        if model_vram > 0.0 {
+            let model_count = m.ollama.as_ref().map(|o| o.running_models.len()).unwrap_or(0);
+            let label = format!("Modell-VRAM ({} geladen)", model_count);
+            content.pack_start(&build_resource_bar(&label, model_vram, m.gtt.total_gb, "GB",
+                if m.gtt.total_gb > 0.0 { model_vram / m.gtt.total_gb } else { 0.0 }), false, false, 0);
+        }
+
+        // GTT (Unified Memory inkl. System-Overhead)
+        content.pack_start(&build_resource_bar("GTT Unified Memory", m.gtt.used_gb, m.gtt.total_gb, "GB",
             if m.gtt.total_bytes > 0 { m.gtt.used_bytes as f64 / m.gtt.total_bytes as f64 } else { 0.0 }), false, false, 0);
 
         // RAM
